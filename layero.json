@@ -1,0 +1,5 @@
+{
+  "runtime": "node_web",
+  "startCommand": "npm start",
+  "nodeVersion": "22"
+}
