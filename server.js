@@ -446,6 +446,51 @@ h1{
 </div>
 
 <script>
+const poems = [];
+
+function openPoemForm(){
+  const form = document.getElementById('poem-form');
+  form.reset();
+  form.style.display='block';
+  document.getElementById('poem-title').focus();
+}
+
+function savePoem(event){
+  event.preventDefault();
+
+  const form = event.currentTarget;
+  const title = form.elements.title.value.trim();
+  const text = form.elements.text.value.trim();
+
+  if(!title || !text) return;
+
+  poems.push({title,text});
+  renderPoems();
+  form.reset();
+  form.style.display='none';
+}
+
+function renderPoems(){
+  const list = document.getElementById('poem-list');
+  list.replaceChildren();
+
+  poems.forEach(poem=>{
+    const item = document.createElement('div');
+    item.className='item';
+
+    const title = document.createElement('div');
+    title.className='item-title';
+    title.textContent=poem.title;
+
+    const text = document.createElement('div');
+    text.className='item-meta';
+    text.style.whiteSpace='pre-wrap';
+    text.textContent=poem.text;
+
+    item.append(title,text);
+    list.append(item);
+  });
+}
 function login(){
   const user = document.getElementById('user').value;
   const pass = document.getElementById('pass').value;
