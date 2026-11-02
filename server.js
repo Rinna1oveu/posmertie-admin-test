@@ -133,6 +133,14 @@ function githubApiError(status, code){
   return error;
 }
 
+function getPoemId(poem, index){
+  if(typeof poem.id === 'string' && poem.id) return poem.id;
+  const legacyData = {...poem};
+  delete legacyData.id;
+  const signature = `${index}\0${JSON.stringify(legacyData)}`;
+  return `legacy-${crypto.createHash('sha256').update(signature).digest('hex').slice(0, 24)}`;
+}
+
 async function githubRequest(method, body){
   const token = process.env.GITHUB_TOKEN;
   if(!token) throw githubApiError(503, 'GITHUB_TOKEN_MISSING');
@@ -171,16 +179,19 @@ async function readPoemsFromGitHub(){
     }
     const content = Buffer.from(file.content.replace(/\s/g, ''), 'base64').toString('utf8');
     const poems = JSON.parse(content);
-    if(!Array.isArray(poems)) throw new Error('Invalid poems data');
-    return {poems, sha:file.sha};
+    if(!Array.isArray(poems) || poems.some(poem=>!poem || typeof poem !== 'object' || Array.isArray(poem))){
+      throw new Error('Invalid poems data');
+    }
+    const poemsWithIds = poems.map((poem,index)=>({...poem,id:getPoemId(poem,index)}));
+    return {poems:poemsWithIds, sha:file.sha};
   }catch{
     throw githubApiError(502, 'INVALID_GITHUB_FILE');
   }
 }
 
-async function writePoemsToGitHub(poems, sha){
+async function writePoemsToGitHub(poems, sha, message='Update poems from admin panel'){
   const body = {
-    message:'Update poems from admin panel',
+    message,
     content:Buffer.from(JSON.stringify(poems, null, 2) + '\n', 'utf8').toString('base64'),
     branch:GITHUB_BRANCH
   };
@@ -190,13 +201,13 @@ async function writePoemsToGitHub(poems, sha){
   if(!response.ok) throw githubApiError(response.status);
 }
 
-async function appendPoemToGitHub(poem){
+async function mutatePoemsOnGitHub(mutate, message){
   for(let attempt=0;attempt<3;attempt++){
     const current = await readPoemsFromGitHub();
-    const poems = [...current.poems, poem];
+    const poems = mutate(current.poems);
 
     try{
-      await writePoemsToGitHub(poems, current.sha);
+      await writePoemsToGitHub(poems, current.sha, message);
       return poems;
     }catch(error){
       if((error.status === 409 || error.status === 422) && attempt < 2) continue;
@@ -207,10 +218,41 @@ async function appendPoemToGitHub(poem){
   throw githubApiError(409, 'GITHUB_WRITE_CONFLICT');
 }
 
-function queuePoemWrite(poem){
-  const operation = poemWriteQueue.then(()=>appendPoemToGitHub(poem));
+function queuePoemMutation(mutate, message){
+  const operation = poemWriteQueue.then(()=>mutatePoemsOnGitHub(mutate, message));
   poemWriteQueue = operation.then(()=>undefined, ()=>undefined);
   return operation;
+}
+
+function validatePoem(input){
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  const text = typeof input.text === 'string' ? input.text.trim() : '';
+  const date = typeof input.date === 'string' ? input.date.trim() : '';
+  const status = input.status === undefined ? 'published' : input.status;
+  const image = typeof input.image === 'string' ? input.image.trim() : '';
+  const caption = typeof input.caption === 'string' ? input.caption.trim() : '';
+
+  if(!title || !text) return {error:'Название и текст обязательны'};
+  if(title.length > 300 || text.length > 1000000) return {error:'Название или текст слишком длинные'};
+  if(date){
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return {error:'Укажите корректную дату'};
+    const parsedDate = new Date(date + 'T00:00:00.000Z');
+    if(Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0,10) !== date) return {error:'Укажите корректную дату'};
+  }
+  if(status !== 'published' && status !== 'draft') return {error:'Неизвестный статус стихотворения'};
+  if(image.length > 2048 || caption.length > 500) return {error:'Ссылка или подпись к иллюстрации слишком длинная'};
+  const hasUnsupportedScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(image) && !image.startsWith('http://') && !image.startsWith('https://');
+  if(image && (hasUnsupportedScheme || !(image.startsWith('http://') || image.startsWith('https://') || image.startsWith('/') || /^[a-zA-Z0-9._-]/.test(image)))) return {error:'Укажите ссылку или путь к изображению'};
+
+  return {poem:{title,text,date,status,image,caption}};
+}
+
+function sendPoemMutationError(res, error){
+  if(error.code === 'POEM_NOT_FOUND'){
+    sendJson(res, 404, {error:'Стихотворение не найдено'});
+    return;
+  }
+  sendGitHubError(res, error, 'write');
 }
 
 function sendGitHubError(res, error, action){
@@ -501,6 +543,37 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .poem-panel{padding:22px}
 #poem-form{max-width:780px;margin-bottom:21px;padding-bottom:21px;border-bottom:1px solid #592031}
 #poem-form textarea{resize:vertical;min-height:160px}
+.editor-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px}
+.editor-field-wide{grid-column:1/-1}
+.editor-fields select{width:100%;padding:13px 14px;background:#0b0709;color:#f5eff0;border:1px solid #51202a;border-radius:2px}
+.editor-fields select:focus{outline:2px solid #ee234922;border-color:var(--accent)}
+.optional{margin-left:5px;color:#927d83;font-size:11px}
+.editor-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:22px}
+.editor-actions .btn{width:auto}
+.btn-danger{padding:10px 14px;background:#1c0a0f;border:1px solid #772036;border-radius:2px;color:#ed8797;font-weight:650}
+.btn-danger:hover{background:#3b0d18;border-color:#e33454;color:#fff}
+.poem-item-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.poem-item-date{margin-top:5px;color:#987d84;font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.poem-status{display:inline-block;padding:4px 8px;border:1px solid #783047;color:#f18ba0;font-size:10px;letter-spacing:.12em;text-transform:uppercase;white-space:nowrap}
+.poem-status.draft{border-color:#69502a;color:#d8b777}
+.poem-snippet{display:-webkit-box;overflow:hidden;margin-top:10px;color:#b4a1a6;font:14px/1.55 Georgia,"Times New Roman",serif;white-space:pre-wrap;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.poem-item-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.poem-item-actions .btn-secondary,.poem-item-actions .btn-danger{padding:7px 10px;font-size:12px}
+.poem-item-actions .btn-secondary:after{content:""}
+.preview-overlay{position:fixed;z-index:20;inset:0;display:grid;place-items:center;padding:24px;background:#050305e8;backdrop-filter:blur(5px)}
+.preview-overlay[hidden]{display:none}
+.preview-dialog{width:min(100%,850px);max-height:min(90vh,900px);overflow:auto;background:#10080b;border:1px solid #762038;box-shadow:0 24px 100px #000b}
+.preview-toolbar{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#10080bf2;border-bottom:1px solid #501725;color:#c54a62;font-size:10px;font-weight:700;letter-spacing:.18em}
+.preview-poem{position:relative;max-width:700px;margin:0 auto;padding:clamp(28px,7vw,76px) clamp(22px,7vw,72px) 64px}
+.preview-poem:before{content:"";position:absolute;top:28px;left:0;width:28px;height:1px;background:var(--accent)}
+.preview-index{color:#ac4057;font-size:9px;font-weight:700;letter-spacing:.2em}
+.preview-date{margin-top:24px;color:#a78e94;font-size:11px;letter-spacing:.12em;text-transform:uppercase}
+.preview-poem h2{margin:12px 0 27px;color:#fff1f3;font:700 clamp(30px,5vw,48px)/1.12 Georgia,"Times New Roman",serif}
+.preview-body{color:#e3d5d9;font:18px/1.9 Georgia,"Times New Roman",serif;white-space:pre-wrap}
+.preview-figure{margin:36px 0 0}
+.preview-figure img{display:block;max-width:100%;max-height:440px;margin:0 auto;object-fit:contain}
+.preview-figure figcaption{margin-top:10px;color:#a58a91;text-align:center;font:italic 13px Georgia,"Times New Roman",serif}
+.preview-status{margin-top:26px;color:#a83b53;font-size:9px;font-weight:700;letter-spacing:.2em;text-transform:uppercase}
 .poem-list .item{padding:18px 0;border-bottom:1px solid #401722}
 .poem-list .item:last-child{border-bottom:0}
 .item-title{margin-bottom:6px;color:#f4e9eb;font:600 21px Georgia,"Times New Roman",serif}
@@ -534,6 +607,8 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
   .topbar-user span:last-child{display:none}
   .hero{padding:25px 22px;gap:14px}
   .hero-mascot{height:100px;max-width:24%}
+  .editor-fields{grid-template-columns:1fr}
+  .editor-field-wide{grid-column:auto}
   .stats{gap:9px}
   .stat-card{padding:15px 13px}
   .stat-top{align-items:flex-start;gap:5px;font-size:11px}
@@ -547,6 +622,8 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 @media(max-width:480px){
   .hero{display:block;padding:22px 19px}
   .hero-mascot{height:76px;max-width:100%;margin:14px 0 0 auto}
+  .preview-overlay{padding:10px}
+  .preview-body{font-size:16px}
 }
 @media(max-width:420px){
   .nav-link{gap:7px;padding:8px;font-size:12px}
@@ -640,16 +717,61 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
       </div>
       <div class="panel poem-panel">
         <form id="poem-form" onsubmit="savePoem(event)" style="display:none">
-          <div class="panel-heading"><h2>Новое стихотворение</h2><button class="btn-secondary" type="button" onclick="closePoemForm()">Закрыть</button></div>
-          <label for="poem-title">Название</label>
-          <input id="poem-title" name="title" required maxlength="300" placeholder="Название стихотворения">
-          <label for="poem-text">Текст</label>
-          <textarea id="poem-text" name="text" rows="8" required placeholder="Начните писать…"></textarea>
-          <button class="btn" type="submit">Сохранить в архив</button>
+          <input id="poem-id" type="hidden">
+          <div class="panel-heading"><h2 id="poem-form-heading">Новое стихотворение</h2></div>
+          <div class="editor-fields">
+            <div class="editor-field editor-field-wide">
+              <label for="poem-title">Название</label>
+              <input id="poem-title" name="title" required maxlength="300" placeholder="Название стихотворения">
+            </div>
+            <div class="editor-field editor-field-wide">
+              <label for="poem-text">Текст</label>
+              <textarea id="poem-text" name="text" rows="10" required placeholder="Начните писать…"></textarea>
+            </div>
+            <div class="editor-field">
+              <label for="poem-date">Дата</label>
+              <input id="poem-date" name="date" type="date">
+            </div>
+            <div class="editor-field">
+              <label for="poem-status">Статус</label>
+              <select id="poem-status" name="status">
+                <option value="published">Опубликовано</option>
+                <option value="draft">Черновик</option>
+              </select>
+            </div>
+            <div class="editor-field editor-field-wide">
+              <label for="poem-image">Иллюстрация — ссылка или путь</label>
+              <input id="poem-image" name="image" type="text" inputmode="url" maxlength="2048" placeholder="/images/poem.jpg или https://…">
+            </div>
+            <div class="editor-field editor-field-wide">
+              <label for="poem-caption">Подпись к иллюстрации <span class="optional">необязательно</span></label>
+              <input id="poem-caption" name="caption" type="text" maxlength="500" placeholder="Подпись">
+            </div>
+          </div>
+          <div class="editor-actions">
+            <button class="btn" type="submit">Сохранить</button>
+            <button class="btn-secondary" type="submit" data-save-status="draft">Сохранить как черновик</button>
+            <button class="btn-secondary" type="button" onclick="previewPoemForm()">Предпросмотр</button>
+            <button class="btn-secondary" type="button" onclick="closePoemForm()">Закрыть</button>
+            <button class="btn-danger" id="poem-delete" type="button" onclick="deleteEditingPoem()" hidden>Удалить</button>
+          </div>
         </form>
         <div class="error" id="poem-error" role="alert"></div>
         <div class="poem-list" id="poem-list"></div>
       </div>
+      <div class="preview-overlay" id="poem-preview" hidden onclick="if(event.target===this)closePoemPreview()">
+      <article class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+        <div class="preview-toolbar"><span>PREVIEW / POETRY</span><button class="btn-secondary" type="button" onclick="closePoemPreview()">Закрыть <span aria-hidden="true">×</span></button></div>
+        <div class="preview-poem">
+          <div class="preview-index">ПОСМЕРТИЕ РИННЫ · АРХИВ</div>
+          <div class="preview-date" id="preview-date"></div>
+          <h2 id="preview-title"></h2>
+          <div class="preview-body" id="preview-body"></div>
+          <figure class="preview-figure" id="preview-figure" hidden><img id="preview-image" alt=""><figcaption id="preview-caption"></figcaption></figure>
+          <div class="preview-status" id="preview-status"></div>
+        </div>
+      </article>
+    </div>
     </section>
     <section class="section" id="cycles">
       <div class="page-heading"><div class="eyebrow">Структура архива</div><h1>Циклы</h1><div class="subtitle">Тематические собрания стихотворений</div></div>
@@ -703,35 +825,138 @@ function showPoemError(message){
   error.style.display = 'block';
 }
 
+let editingPoemId = '';
+
 function openPoemForm(){
   const form = document.getElementById('poem-form');
   form.reset();
-  form.style.display='block';
+  editingPoemId = '';
+  document.getElementById('poem-id').value = '';
+  document.getElementById('poem-form-heading').textContent = 'Новое стихотворение';
+  const now = new Date();
+  document.getElementById('poem-date').value = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0,10);
+  document.getElementById('poem-status').value = 'published';
+  document.getElementById('poem-delete').hidden = true;
+  document.getElementById('poem-error').style.display = 'none';
+  form.style.display = 'block';
   document.getElementById('poem-title').focus();
 }
 function closePoemForm(){
   const form = document.getElementById('poem-form');
   form.reset();
-  form.style.display='none';
+  form.style.display = 'none';
+  editingPoemId = '';
+  document.getElementById('poem-id').value = '';
+  document.getElementById('poem-delete').hidden = true;
 }
 function startPoem(){
   showSection('poems');
   openPoemForm();
 }
-
+function editPoem(poem){
+  showSection('poems');
+  editingPoemId = poem.id;
+  document.getElementById('poem-id').value = poem.id;
+  document.getElementById('poem-form-heading').textContent = 'Редактировать стихотворение';
+  document.getElementById('poem-title').value = poem.title || '';
+  document.getElementById('poem-text').value = poem.text || '';
+  document.getElementById('poem-date').value = poem.date || '';
+  document.getElementById('poem-status').value = poem.status === 'draft' ? 'draft' : 'published';
+  document.getElementById('poem-image').value = poem.image || '';
+  document.getElementById('poem-caption').value = poem.caption || '';
+  document.getElementById('poem-delete').hidden = false;
+  document.getElementById('poem-error').style.display = 'none';
+  document.getElementById('poem-form').style.display = 'block';
+  document.getElementById('poem-title').focus();
+}
+function formatPoemDate(date){
+  if(!date) return 'Дата не указана';
+  const parts = date.split('-');
+  return parts.length === 3 ? parts[2] + '.' + parts[1] + '.' + parts[0] : date;
+}
+function poemStatusLabel(poem){
+  return poem.status === 'draft' ? 'Черновик' : 'Опубликовано';
+}
+function safeImageSource(value){
+  const source = (value || '').trim();
+  if(!source) return '';
+  try{
+    const parsed = new URL(source, window.location.origin);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? source : '';
+  }catch{
+    return '';
+  }
+}
+function fillPoemPreview(poem){
+  document.getElementById('preview-title').textContent = poem.title || 'Без названия';
+  document.getElementById('preview-date').textContent = formatPoemDate(poem.date);
+  document.getElementById('preview-body').textContent = poem.text || '';
+  document.getElementById('preview-status').textContent = poemStatusLabel(poem);
+  const figure = document.getElementById('preview-figure');
+  const image = document.getElementById('preview-image');
+  const source = safeImageSource(poem.image);
+  image.onerror = ()=>{figure.hidden = true;};
+  image.onload = ()=>{figure.hidden = false;};
+  if(source){
+    image.src = source;
+    figure.hidden = false;
+    document.getElementById('preview-caption').textContent = poem.caption || '';
+    document.getElementById('preview-caption').hidden = !poem.caption;
+  }else{
+    image.removeAttribute('src');
+    figure.hidden = true;
+  }
+  document.getElementById('poem-preview').hidden = false;
+}
+function previewPoemForm(){
+  const title = document.getElementById('poem-title').value.trim();
+  const text = document.getElementById('poem-text').value.trim();
+  if(!title || !text){
+    showPoemError('Укажите название и текст, чтобы открыть предпросмотр.');
+    return;
+  }
+  document.getElementById('poem-error').style.display = 'none';
+  fillPoemPreview({
+    title,
+    text,
+    date:document.getElementById('poem-date').value,
+    status:document.getElementById('poem-status').value,
+    image:document.getElementById('poem-image').value,
+    caption:document.getElementById('poem-caption').value.trim()
+  });
+}
+function openPoemPreview(poem){
+  fillPoemPreview(poem);
+}
+function closePoemPreview(){
+  document.getElementById('poem-preview').hidden = true;
+}
 async function savePoem(event){
   event.preventDefault();
   const form = event.currentTarget;
   const title = document.getElementById('poem-title').value.trim();
   const text = document.getElementById('poem-text').value.trim();
   if(!title || !text) return;
-  const submitButton = form.querySelector('[type="submit"]');
-  submitButton.disabled = true;
+  const submitButton = form.querySelector('[type="submit"]:focus') || event.submitter;
+  const forcedStatus = submitButton && submitButton.dataset.saveStatus;
+  const poem = {
+    title,
+    text,
+    date:document.getElementById('poem-date').value,
+    status:forcedStatus || document.getElementById('poem-status').value,
+    image:document.getElementById('poem-image').value.trim(),
+    caption:document.getElementById('poem-caption').value.trim()
+  };
+  const payload = editingPoemId
+    ? {action:'update',id:editingPoemId,poem}
+    : {action:'create',poem};
+  const saveButtons = form.querySelectorAll('[type="submit"]');
+  saveButtons.forEach(button=>button.disabled = true);
   try{
     const response = await fetch('/api/poems', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({title,text})
+      body:JSON.stringify(payload)
     });
     const result = await response.json();
     if(!response.ok) throw new Error(result.error || 'Не удалось сохранить стихотворение');
@@ -739,15 +964,40 @@ async function savePoem(event){
     poemsLoaded = true;
     setStorageStatus('online');
     renderPoems();
-    form.reset();
-    form.style.display='none';
-    document.getElementById('poem-error').style.display='none';
+    closePoemForm();
+    document.getElementById('poem-error').style.display = 'none';
   }catch(error){
     setStorageStatus('offline');
     showPoemError(error.message);
   }finally{
-    submitButton.disabled = false;
+    saveButtons.forEach(button=>button.disabled = false);
   }
+}
+async function deletePoem(id,title){
+  if(!window.confirm('Удалить стихотворение «' + (title || 'Без названия') + '»? Это действие нельзя отменить.')) return;
+  try{
+    const response = await fetch('/api/poems', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'delete',id})
+    });
+    const result = await response.json();
+    if(!response.ok) throw new Error(result.error || 'Не удалось удалить стихотворение');
+    poems = result.poems;
+    poemsLoaded = true;
+    setStorageStatus('online');
+    renderPoems();
+    if(editingPoemId === id) closePoemForm();
+    closePoemPreview();
+    document.getElementById('poem-error').style.display = 'none';
+  }catch(error){
+    showPoemError(error.message);
+  }
+}
+function deleteEditingPoem(){
+  if(!editingPoemId) return;
+  const poem = poems.find(item=>item.id === editingPoemId);
+  deletePoem(editingPoemId,poem && poem.title);
 }
 
 function renderPoems(){
@@ -770,14 +1020,44 @@ function renderPoems(){
   }
   poems.forEach(poem=>{
     const item = document.createElement('article');
-    item.className='item';
+    item.className = 'item';
+    const head = document.createElement('div');
+    head.className = 'poem-item-head';
+    const titleBlock = document.createElement('div');
     const title = document.createElement('div');
-    title.className='item-title';
-    title.textContent=poem.title;
-    const text = document.createElement('div');
-    text.className='item-meta';
-    text.textContent=poem.text;
-    item.append(title,text);
+    title.className = 'item-title';
+    title.textContent = poem.title || 'Без названия';
+    const date = document.createElement('div');
+    date.className = 'poem-item-date';
+    date.textContent = formatPoemDate(poem.date);
+    titleBlock.append(title,date);
+    const status = document.createElement('span');
+    status.className = 'poem-status' + (poem.status === 'draft' ? ' draft' : '');
+    status.textContent = poemStatusLabel(poem);
+    head.append(titleBlock,status);
+    const snippet = document.createElement('div');
+    snippet.className = 'poem-snippet';
+    const trimmedText = (poem.text || '').trim();
+    snippet.textContent = trimmedText.length > 220 ? trimmedText.slice(0,220) + '…' : trimmedText;
+    const actions = document.createElement('div');
+    actions.className = 'poem-item-actions';
+    const preview = document.createElement('button');
+    preview.className = 'btn-secondary';
+    preview.type = 'button';
+    preview.textContent = 'Предпросмотр';
+    preview.addEventListener('click',()=>openPoemPreview(poem));
+    const edit = document.createElement('button');
+    edit.className = 'btn-secondary';
+    edit.type = 'button';
+    edit.textContent = 'Изменить';
+    edit.addEventListener('click',()=>editPoem(poem));
+    const remove = document.createElement('button');
+    remove.className = 'btn-danger';
+    remove.type = 'button';
+    remove.textContent = 'Удалить';
+    remove.addEventListener('click',()=>deletePoem(poem.id,poem.title));
+    actions.append(preview,edit,remove);
+    item.append(head,snippet,actions);
     list.append(item);
   });
 }
@@ -991,29 +1271,83 @@ const server = http.createServer((req, res) => {
       }
 
       readRequestBody(req).then(body=>{
-        let poem;
+        let payload;
         try{
-          poem = JSON.parse(body);
+          payload = JSON.parse(body);
         }catch{
           sendJson(res, 400, {error:'Некорректный JSON'});
           return;
         }
 
-        if(!poem || typeof poem !== 'object' || Array.isArray(poem)){
+        if(!payload || typeof payload !== 'object' || Array.isArray(payload)){
           sendJson(res, 400, {error:'Ожидался объект стихотворения'});
           return;
         }
 
-        const title = typeof poem.title === 'string' ? poem.title.trim() : '';
-        const text = typeof poem.text === 'string' ? poem.text.trim() : '';
-        if(!title || !text){
-          sendJson(res, 400, {error:'Название и текст обязательны'});
+        const action = payload.action || 'create';
+        if(action === 'create'){
+          const input = payload.poem && typeof payload.poem === 'object' && !Array.isArray(payload.poem) ? payload.poem : payload;
+          const validation = validatePoem(input);
+          if(validation.error){
+            sendJson(res, 400, {error:validation.error});
+            return;
+          }
+          const newPoem = {...validation.poem,id:crypto.randomUUID()};
+          queuePoemMutation(poems=>[...poems,newPoem],'Create poem from admin panel').then(poems=>{
+            sendJson(res, 201, {poems});
+          }).catch(error=>sendPoemMutationError(res,error));
           return;
         }
 
-        queuePoemWrite({title, text}).then(poems=>{
-          sendJson(res, 201, {poems});
-        }).catch(error=>sendGitHubError(res, error, 'write'));
+        if(action === 'update'){
+          const id = typeof payload.id === 'string' ? payload.id : '';
+          const input = payload.poem;
+          if(!id || !input || typeof input !== 'object' || Array.isArray(input)){
+            sendJson(res, 400, {error:'Не указано стихотворение для изменения'});
+            return;
+          }
+          const validation = validatePoem(input);
+          if(validation.error){
+            sendJson(res, 400, {error:validation.error});
+            return;
+          }
+          queuePoemMutation(poems=>{
+            const index = poems.findIndex((poem,position)=>getPoemId(poem,position) === id);
+            if(index < 0){
+              const error = new Error('Poem not found');
+              error.code = 'POEM_NOT_FOUND';
+              throw error;
+            }
+            const updated = poems.slice();
+            updated[index] = {...updated[index],...validation.poem,id:getPoemId(updated[index],index)};
+            return updated;
+          },'Edit poem from admin panel').then(poems=>{
+            sendJson(res, 200, {poems});
+          }).catch(error=>sendPoemMutationError(res,error));
+          return;
+        }
+
+        if(action === 'delete'){
+          const id = typeof payload.id === 'string' ? payload.id : '';
+          if(!id){
+            sendJson(res, 400, {error:'Не указано стихотворение для удаления'});
+            return;
+          }
+          queuePoemMutation(poems=>{
+            const index = poems.findIndex((poem,position)=>getPoemId(poem,position) === id);
+            if(index < 0){
+              const error = new Error('Poem not found');
+              error.code = 'POEM_NOT_FOUND';
+              throw error;
+            }
+            return poems.filter((_,position)=>position !== index);
+          },'Delete poem from admin panel').then(poems=>{
+            sendJson(res, 200, {poems});
+          }).catch(error=>sendPoemMutationError(res,error));
+          return;
+        }
+
+        sendJson(res, 400, {error:'Неизвестное действие со стихотворением'});
       }).catch(error=>{
         if(!res.headersSent){
           const status = error.message === 'Request body is too large' ? 413 : 400;
