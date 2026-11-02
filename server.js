@@ -327,6 +327,123 @@ function queueCycleMutation(mutate, message){
   return operation;
 }
 
+async function removePoemReferencesFromCycles(poemId){
+  let current = await readCyclesFromGitHub();
+
+  for(let attempt=0;attempt<3;attempt++){
+    const removedReferences = current.cycles
+      .map((cycle,index)=>({
+        cycleId:getCycleId(cycle,index),
+        positions:(cycle.poemIds || []).reduce((positions,id,index)=>{
+          if(id === poemId) positions.push(index);
+          return positions;
+        },[])
+      }))
+      .filter(reference=>reference.positions.length > 0);
+
+    if(!removedReferences.length) return {rollbackReferences:[]};
+
+    const updatedCycles = current.cycles.map((cycle,index)=>{
+      const cycleId = getCycleId(cycle,index);
+      if(!removedReferences.some(reference=>reference.cycleId === cycleId)) return cycle;
+      return {...cycle,poemIds:(cycle.poemIds || []).filter(id=>id !== poemId)};
+    });
+
+    try{
+      await writeCyclesToGitHub(updatedCycles,current.sha,'Remove deleted poem from cycles');
+      return {rollbackReferences:removedReferences};
+    }catch(error){
+      let latest;
+      try{
+        latest = await readCyclesFromGitHub();
+      }catch{
+        throw error;
+      }
+      if(!latest.cycles.some(cycle=>(cycle.poemIds || []).includes(poemId))){
+        return {rollbackReferences:[]};
+      }
+      if((error.status === 409 || error.status === 422) && attempt < 2){
+        current = latest;
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw githubApiError(409,'GITHUB_CYCLE_CLEANUP_CONFLICT');
+}
+
+async function restorePoemReferencesToCycles(poemId,references){
+  if(!references.length) return;
+
+  for(let attempt=0;attempt<3;attempt++){
+    const current = await readCyclesFromGitHub();
+    let changed = false;
+    const restoredCycles = current.cycles.map((cycle,index)=>{
+      const reference = references.find(item=>item.cycleId === getCycleId(cycle,index));
+      if(!reference || (cycle.poemIds || []).includes(poemId)) return cycle;
+
+      const poemIds = [...(cycle.poemIds || [])];
+      reference.positions.forEach(position=>poemIds.splice(Math.min(position,poemIds.length),0,poemId));
+      changed = true;
+      return {...cycle,poemIds};
+    });
+
+    if(!changed) return;
+
+    try{
+      await writeCyclesToGitHub(restoredCycles,current.sha,'Restore poem references after failed deletion');
+      return;
+    }catch(error){
+      if((error.status === 409 || error.status === 422) && attempt < 2) continue;
+      throw error;
+    }
+  }
+
+  throw githubApiError(409,'GITHUB_CYCLE_RESTORE_CONFLICT');
+}
+
+async function deletePoemWithCycleCleanup(poemId){
+  const currentPoems = await readPoemsFromGitHub();
+  const poemIndex = currentPoems.poems.findIndex((poem,index)=>getPoemId(poem,index) === poemId);
+  if(poemIndex < 0){
+    const error = new Error('Poem not found');
+    error.code = 'POEM_NOT_FOUND';
+    throw error;
+  }
+
+  const canonicalPoemId = getPoemId(currentPoems.poems[poemIndex],poemIndex);
+  const {rollbackReferences} = await removePoemReferencesFromCycles(canonicalPoemId);
+  const updatedPoems = currentPoems.poems.filter((_,index)=>index !== poemIndex);
+
+  try{
+    await writePoemsToGitHub(updatedPoems,currentPoems.sha,'Delete poem from admin panel');
+    return updatedPoems;
+  }catch(error){
+    let latestPoems;
+    try{
+      latestPoems = await readPoemsFromGitHub();
+    }catch{
+      throw error;
+    }
+
+    const poemStillExists = latestPoems.poems.some((poem,index)=>getPoemId(poem,index) === canonicalPoemId);
+    if(!poemStillExists) return latestPoems.poems;
+
+    await restorePoemReferencesToCycles(canonicalPoemId,rollbackReferences);
+    throw error;
+  }
+}
+
+function queuePoemDeletionWithCycleCleanup(poemId){
+  const pendingWrites = Promise.all([poemWriteQueue,cycleWriteQueue]);
+  const operation = pendingWrites.then(()=>deletePoemWithCycleCleanup(poemId));
+  const nextWrite = operation.then(()=>undefined,()=>undefined);
+  poemWriteQueue = nextWrite;
+  cycleWriteQueue = nextWrite;
+  return operation;
+}
+
 function validateCycle(input, existingPoemIds){
   const title = typeof input.title === 'string' ? input.title.trim() : '';
   const description = typeof input.description === 'string' ? input.description.trim() : '';
@@ -1269,7 +1386,22 @@ async function deletePoem(id,title){
     poems = result.poems;
     poemsLoaded = true;
     setStorageStatus('online');
+    try{
+      const cycleResponse = await fetch('/api/cycles');
+      const cycleResult = await cycleResponse.json();
+      if(!cycleResponse.ok) throw new Error(cycleResult.error || 'Не удалось обновить циклы');
+      cycles = cycleResult.cycles;
+      cyclesLoaded = true;
+      cyclesLoadError = '';
+      renderCycles();
+      clearPoemCyclesError();
+    }catch(error){
+      cyclesLoaded = false;
+      cyclesLoadError = error.message;
+      showPoemCyclesError(error.message);
+    }
     renderPoems();
+    updatePoemCycleEditor();
     if(editingPoemId === id) closePoemForm();
     closePoemPreview();
     document.getElementById('poem-error').style.display = 'none';
@@ -2033,15 +2165,7 @@ const server = http.createServer((req, res) => {
             sendJson(res, 400, {error:'Не указано стихотворение для удаления'});
             return;
           }
-          queuePoemMutation(poems=>{
-            const index = poems.findIndex((poem,position)=>getPoemId(poem,position) === id);
-            if(index < 0){
-              const error = new Error('Poem not found');
-              error.code = 'POEM_NOT_FOUND';
-              throw error;
-            }
-            return poems.filter((_,position)=>position !== index);
-          },'Delete poem from admin panel').then(poems=>{
+          queuePoemDeletionWithCycleCleanup(id).then(poems=>{
             sendJson(res, 200, {poems});
           }).catch(error=>sendPoemMutationError(res,error));
           return;
