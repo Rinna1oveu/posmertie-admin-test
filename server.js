@@ -369,13 +369,25 @@ h1{
       </div>
 
       <div class="panel">
-        <div class="item">
-          <div class="item-title">Пока нет произведений</div>
-          <div class="item-meta">
-            Здесь появится список стихотворений.
-          </div>
-        </div>
+  <form id="poem-form" onsubmit="savePoem(event)" style="display:none">
+    <label for="poem-title">Название</label>
+    <input id="poem-title" name="title" required>
+
+    <label for="poem-text">Текст</label>
+    <textarea id="poem-text" name="text" rows="8" required></textarea>
+
+    <button class="btn" type="submit">Сохранить</button>
+  </form>
+
+  <div id="poem-list">
+    <div class="item" id="empty-poems">
+      <div class="item-title">Пока нет произведений</div>
+      <div class="item-meta">
+        Здесь появится список стихотворений.
       </div>
+    </div>
+  </div>
+</div>
     </section>
 
     <section class="section" id="cycles">
