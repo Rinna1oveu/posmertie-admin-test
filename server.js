@@ -365,7 +365,7 @@ h1{
           <div class="subtitle">Управление стихотворениями</div>
         </div>
 
-        <button class="add">+ Новое стихотворение</button>
+        <button class="add" type="button" onclick="openPoemForm()">+ Новое стихотворение</button>
       </div>
 
       <div class="panel">
