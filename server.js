@@ -151,7 +151,10 @@ async function githubRequest(method, body){
     options.body = JSON.stringify(body);
   }
 
-  return fetch(`${GITHUB_FILE_URL}?ref=${encodeURIComponent(GITHUB_BRANCH)}`, options);
+  const url = method === 'GET'
+    ? `${GITHUB_FILE_URL}?ref=${encodeURIComponent(GITHUB_BRANCH)}`
+    : GITHUB_FILE_URL;
+  return fetch(url, options);
 }
 
 async function readPoemsFromGitHub(){
