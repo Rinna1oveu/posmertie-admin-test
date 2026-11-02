@@ -659,6 +659,18 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .poem-item-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
 .poem-item-actions .btn-secondary,.poem-item-actions .btn-danger{padding:7px 10px;font-size:12px}
 .poem-item-actions .btn-secondary:after{content:""}
+.poem-filter-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:8px;padding-bottom:15px;border-bottom:1px solid #401722}
+.poem-cycle-filter{display:flex;flex-wrap:wrap;gap:7px}
+.poem-cycle-filter button{padding:7px 11px;border:1px solid #54202c;border-radius:2px;background:#10080b;color:#ae969c;font-size:11px;transition:background .15s,border-color .15s,color .15s}
+.poem-cycle-filter button:hover,.poem-cycle-filter button.active{border-color:#a62a45;background:#310e18;color:#fff}
+.poem-filter-count{color:#8d747b;font-size:10px;letter-spacing:.12em;text-transform:uppercase}
+.poem-cycle-info{margin-top:8px;color:#97757d;font-size:11px;letter-spacing:.06em}
+.poem-cycle-info.has-cycles{color:#d44c65}
+.poem-cycle-editor{margin-top:18px;padding:14px 15px;border:1px solid #421722;background:#11080c}
+.poem-cycle-editor-title{margin-bottom:8px;color:#d64c65;font-size:10px;font-weight:700;letter-spacing:.18em;text-transform:uppercase}
+.poem-editor-cycle{padding:5px 0;color:#e2cdd2;font:14px Georgia,"Times New Roman",serif}
+.poem-editor-cycle + .poem-editor-cycle{border-top:1px solid #35131b}
+.poem-editor-cycle-note{color:#947d83;font:italic 12px Georgia,"Times New Roman",serif}
 .preview-overlay{position:fixed;z-index:20;inset:0;display:grid;place-items:center;padding:24px;background:#050305e8;backdrop-filter:blur(5px)}
 .preview-overlay[hidden]{display:none}
 .preview-dialog{width:min(100%,850px);max-height:min(90vh,900px);overflow:auto;background:#10080b;border:1px solid #762038;box-shadow:0 24px 100px #000b}
@@ -758,6 +770,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 @media(max-width:480px){
   .hero{display:block;padding:22px 19px}
   .hero-mascot{height:76px;max-width:100%;margin:14px 0 0 auto}
+  .poem-filter-bar{align-items:flex-start;flex-direction:column}
   .preview-overlay{padding:10px}
   .preview-body{font-size:16px}
   .cycle-card{grid-template-columns:72px minmax(0,1fr);gap:12px}
@@ -887,6 +900,11 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
               <input id="poem-caption" name="caption" type="text" maxlength="500" placeholder="Подпись">
             </div>
           </div>
+          <div class="poem-cycle-editor">
+            <div class="poem-cycle-editor-title">Циклы</div>
+            <div id="poem-editor-cycles" class="poem-editor-cycle-note">Загрузка циклов…</div>
+            <div class="poem-editor-cycle-note">Принадлежность к циклам меняется в разделе «Циклы».</div>
+          </div>
           <div class="editor-actions">
             <button class="btn" type="submit">Сохранить</button>
             <button class="btn-secondary" type="submit" data-save-status="draft">Сохранить как черновик</button>
@@ -896,6 +914,15 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
           </div>
         </form>
         <div class="error" id="poem-error" role="alert"></div>
+        <div class="poem-filter-bar">
+          <div class="poem-cycle-filter" role="group" aria-label="Фильтр по циклам">
+            <button class="active" type="button" data-poem-filter="all" onclick="setPoemCycleFilter('all')">Все</button>
+            <button type="button" data-poem-filter="outside" onclick="setPoemCycleFilter('outside')">Вне циклов</button>
+            <button type="button" data-poem-filter="inside" onclick="setPoemCycleFilter('inside')">В циклах</button>
+          </div>
+          <span class="poem-filter-count" id="poem-filter-count"></span>
+        </div>
+        <div class="error" id="poem-cycles-error" role="alert"></div>
         <div class="poem-list" id="poem-list"></div>
       </div>
       <div class="preview-overlay" id="poem-preview" hidden onclick="if(event.target===this)closePoemPreview()">
@@ -989,9 +1016,11 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 <script>
 let poems = [];
 let poemsLoaded = false;
+let poemCycleFilter = 'all';
 const viewNames = {dashboard:'Главная',poems:'Стихи',cycles:'Циклы',prose:'Проза',settings:'Настройки'};
 let cycles = [];
 let cyclesLoaded = false;
+let cyclesLoadError = '';
 let cyclesLoadPromise = null;
 let editingCycleId = '';
 let editingCyclePoemIds = [];
@@ -1029,6 +1058,54 @@ function showPoemError(message){
   error.style.display = 'block';
 }
 
+function clearPoemCyclesError(){
+  const error = document.getElementById('poem-cycles-error');
+  if(!error) return;
+  error.textContent = '';
+  error.style.display = 'none';
+}
+function showPoemCyclesError(message){
+  const error = document.getElementById('poem-cycles-error');
+  if(!error) return;
+  error.textContent = message;
+  error.style.display = 'block';
+}
+function getCyclesForPoem(poemId){
+  if(!poemId || !cyclesLoaded) return [];
+  return cycles.filter(cycle=>Array.isArray(cycle.poemIds) && cycle.poemIds.includes(poemId));
+}
+function poemCycleDescription(poemId){
+  if(!cyclesLoaded) return cyclesLoadError ? 'Не удалось загрузить циклы' : 'Загрузка циклов…';
+  const memberships = getCyclesForPoem(poemId);
+  if(!memberships.length) return 'Вне циклов';
+  if(memberships.length === 1) return 'Цикл: ' + (memberships[0].title || 'Без названия');
+  return 'В циклах: ' + memberships.length;
+}
+function updatePoemCycleEditor(){
+  const container = document.getElementById('poem-editor-cycles');
+  if(!container) return;
+  container.replaceChildren();
+  if(!editingPoemId){
+    container.textContent = 'Сохраните стихотворение, чтобы добавить его в цикл.';
+    return;
+  }
+  if(!cyclesLoaded){
+    container.textContent = cyclesLoadError ? 'Не удалось загрузить циклы.' : 'Загрузка циклов…';
+    return;
+  }
+  const memberships = getCyclesForPoem(editingPoemId);
+  if(!memberships.length){
+    container.textContent = 'Вне циклов';
+    return;
+  }
+  memberships.forEach(cycle=>{
+    const entry = document.createElement('div');
+    entry.className = 'poem-editor-cycle';
+    entry.textContent = cycle.title || 'Без названия';
+    container.append(entry);
+  });
+}
+
 let editingPoemId = '';
 
 function openPoemForm(){
@@ -1042,6 +1119,7 @@ function openPoemForm(){
   document.getElementById('poem-status').value = 'published';
   document.getElementById('poem-delete').hidden = true;
   document.getElementById('poem-error').style.display = 'none';
+  updatePoemCycleEditor();
   form.style.display = 'block';
   document.getElementById('poem-title').focus();
 }
@@ -1070,6 +1148,7 @@ function editPoem(poem){
   document.getElementById('poem-caption').value = poem.caption || '';
   document.getElementById('poem-delete').hidden = false;
   document.getElementById('poem-error').style.display = 'none';
+  updatePoemCycleEditor();
   document.getElementById('poem-form').style.display = 'block';
   document.getElementById('poem-title').focus();
 }
@@ -1204,12 +1283,23 @@ function deleteEditingPoem(){
   deletePoem(editingPoemId,poem && poem.title);
 }
 
+function setPoemCycleFilter(filter){
+  if(!['all','outside','inside'].includes(filter)) return;
+  poemCycleFilter = filter;
+  renderPoems();
+}
+
 function renderPoems(){
   const list = document.getElementById('poem-list');
   list.replaceChildren();
   document.getElementById('poem-count').textContent = String(poems.length);
   renderRecentChanges();
+  document.querySelectorAll('[data-poem-filter]').forEach(button=>{
+    button.classList.toggle('active',button.dataset.poemFilter === poemCycleFilter);
+  });
   if(poems.length === 0){
+    const filterCount = document.getElementById('poem-filter-count');
+    if(filterCount) filterCount.textContent = '0 / 0';
     const empty = document.createElement('div');
     empty.className = 'item';
     const title = document.createElement('div');
@@ -1222,7 +1312,22 @@ function renderPoems(){
     list.append(empty);
     return;
   }
-  poems.forEach(poem=>{
+  const visiblePoems = !cyclesLoaded || poemCycleFilter === 'all'
+    ? poems
+    : poems.filter(poem=>{
+      const inCycles = getCyclesForPoem(poem.id).length > 0;
+      return poemCycleFilter === 'inside' ? inCycles : !inCycles;
+    });
+  const filterCount = document.getElementById('poem-filter-count');
+  if(filterCount) filterCount.textContent = visiblePoems.length + ' / ' + poems.length;
+  if(!visiblePoems.length){
+    const empty = document.createElement('div');
+    empty.className = 'item item-meta empty-copy';
+    empty.textContent = 'В этой категории пока нет стихотворений. Переключите фильтр или выберите «Все».';
+    list.append(empty);
+    return;
+  }
+  visiblePoems.forEach(poem=>{
     const item = document.createElement('article');
     item.className = 'item';
     const head = document.createElement('div');
@@ -1243,6 +1348,10 @@ function renderPoems(){
     snippet.className = 'poem-snippet';
     const trimmedText = (poem.text || '').trim();
     snippet.textContent = trimmedText.length > 220 ? trimmedText.slice(0,220) + '…' : trimmedText;
+    const cycleInfo = document.createElement('div');
+    const poemCycles = getCyclesForPoem(poem.id);
+    cycleInfo.className = 'poem-cycle-info' + (poemCycles.length ? ' has-cycles' : '');
+    cycleInfo.textContent = poemCycleDescription(poem.id);
     const actions = document.createElement('div');
     actions.className = 'poem-item-actions';
     const preview = document.createElement('button');
@@ -1261,7 +1370,7 @@ function renderPoems(){
     remove.textContent = 'Удалить';
     remove.addEventListener('click',()=>deletePoem(poem.id,poem.title));
     actions.append(preview,edit,remove);
-    item.append(head,snippet,actions);
+    item.append(head,snippet,cycleInfo,actions);
     list.append(item);
   });
 }
@@ -1307,6 +1416,7 @@ async function loadPoemsForCycles(){
 async function loadCycles(){
   if(cyclesLoaded) return;
   if(cyclesLoadPromise) return cyclesLoadPromise;
+  cyclesLoadError = '';
   cyclesLoadPromise = (async()=>{
     try{
       await loadPoemsForCycles();
@@ -1315,9 +1425,17 @@ async function loadCycles(){
       if(!response.ok) throw new Error(result.error || 'Не удалось загрузить циклы');
       cycles = result.cycles;
       cyclesLoaded = true;
+      cyclesLoadError = '';
       renderCycles();
+      renderPoems();
+      updatePoemCycleEditor();
+      clearPoemCyclesError();
     }catch(error){
+      cyclesLoadError = error.message;
       showCycleError(error.message);
+      showPoemCyclesError(error.message);
+      renderPoems();
+      updatePoemCycleEditor();
     }finally{
       cyclesLoadPromise = null;
     }
@@ -1502,6 +1620,8 @@ async function saveCycle(event){
     cycles = result.cycles;
     cyclesLoaded = true;
     renderCycles();
+    renderPoems();
+    updatePoemCycleEditor();
     closeCycleForm();
     clearCycleError();
   }catch(error){
@@ -1528,6 +1648,8 @@ async function deleteCycle(id,title){
     cycles = result.cycles;
     cyclesLoaded = true;
     renderCycles();
+    renderPoems();
+    updatePoemCycleEditor();
     if(editingCycleId === id) closeCycleForm();
     closeCyclePreview();
     clearCycleError();
@@ -1730,7 +1852,7 @@ function show(id,button){
   const activeButton = button || document.querySelector('.nav-link[data-view="' + id + '"]');
   if(activeButton) activeButton.classList.add('active');
   document.getElementById('view-title').textContent = viewNames[id] || 'Архив';
-  if(id === 'cycles') loadCycles();
+  if(id === 'cycles' || id === 'poems') loadCycles();
 }
 
 restoreSession();
