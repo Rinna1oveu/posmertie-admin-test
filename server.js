@@ -1,4 +1,42 @@
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const dataDirectory = path.join(__dirname, 'data');
+const poemsFile = path.join(dataDirectory, 'poems.json');
+
+function readPoems(){
+  try{
+    const poems = JSON.parse(fs.readFileSync(poemsFile, 'utf8'));
+    return Array.isArray(poems) ? poems : [];
+  }catch(error){
+    if(error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+function writePoems(poems){
+  fs.mkdirSync(dataDirectory, {recursive:true});
+  const temporaryFile = poemsFile + '.tmp';
+  fs.writeFileSync(temporaryFile, JSON.stringify(poems, null, 2) + '\n', 'utf8');
+  fs.renameSync(temporaryFile, poemsFile);
+}
+
+function readRequestBody(req){
+  return new Promise((resolve, reject)=>{
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk=>{
+      body += chunk;
+      if(body.length > 1024 * 1024){
+        reject(new Error('Request body is too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', ()=>resolve(body));
+    req.on('error', reject);
+  });
+}
 
 const html = `
 <!DOCTYPE html>
@@ -446,7 +484,33 @@ h1{
 </div>
 
 <script>
-const poems = [];
+let poems = [];
+let poemsLoaded = false;
+
+async function loadPoems(){
+  try{
+    const response = await fetch('/api/poems');
+    if(!response.ok) throw new Error('Could not load poems');
+    poems = await response.json();
+    poemsLoaded = true;
+    renderPoems();
+  }catch(error){
+    showPoemError(error.message);
+  }
+}
+
+function showPoemError(message){
+  const list = document.getElementById('poem-list');
+  let error = document.getElementById('poem-error');
+  if(!error){
+    error = document.createElement('div');
+    error.id = 'poem-error';
+    error.className = 'error';
+    error.style.display = 'block';
+    list.before(error);
+  }
+  error.textContent = message;
+}
 
 function openPoemForm(){
   const form = document.getElementById('poem-form');
@@ -455,7 +519,7 @@ function openPoemForm(){
   document.getElementById('poem-title').focus();
 }
 
-function savePoem(event){
+async function savePoem(event){
   event.preventDefault();
 
   const form = event.currentTarget;
@@ -464,15 +528,40 @@ function savePoem(event){
 
   if(!title || !text) return;
 
-  poems.push({title,text});
-  renderPoems();
-  form.reset();
-  form.style.display='none';
+  const submitButton = form.querySelector('[type="submit"]');
+  submitButton.disabled = true;
+  try{
+    const response = await fetch('/api/poems', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({title,text})
+    });
+    const result = await response.json();
+    if(!response.ok) throw new Error(result.error || 'Could not save poem');
+    poems = result.poems;
+    renderPoems();
+    form.reset();
+    form.style.display='none';
+    const error = document.getElementById('poem-error');
+    if(error) error.remove();
+  }catch(error){
+    showPoemError(error.message);
+  }finally{
+    submitButton.disabled = false;
+  }
 }
 
 function renderPoems(){
   const list = document.getElementById('poem-list');
   list.replaceChildren();
+
+  if(poems.length === 0){
+    const empty = document.createElement('div');
+    empty.className = 'item';
+    empty.textContent = 'No poems yet';
+    list.append(empty);
+    return;
+  }
 
   poems.forEach(poem=>{
     const item = document.createElement('div');
@@ -500,6 +589,7 @@ function login(){
     document.getElementById('login').style.display='none';
     document.getElementById('app').style.display='block';
     error.style.display='none';
+    if(!poemsLoaded) loadPoems();
   }else{
     error.style.display='block';
   }
@@ -528,6 +618,65 @@ function show(id,button){
 `;
 
 const server = http.createServer((req, res) => {
+
+  if(req.url === '/api/poems' && req.method === 'GET'){
+    try{
+      const poems = readPoems();
+      res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
+      res.end(JSON.stringify(poems));
+    }catch(error){
+      console.error('Failed to read poems:', error);
+      res.writeHead(500, {'Content-Type':'application/json; charset=utf-8'});
+      res.end(JSON.stringify({error:'Не удалось загрузить стихотворения'}));
+    }
+    return;
+  }
+
+  if(req.url === '/api/poems' && req.method === 'POST'){
+    readRequestBody(req).then(body=>{
+      let poem;
+      try{
+        poem = JSON.parse(body);
+      }catch{
+        res.writeHead(400, {'Content-Type':'application/json; charset=utf-8'});
+        res.end(JSON.stringify({error:'Некорректный JSON'}));
+        return;
+      }
+
+      if(!poem || typeof poem !== 'object' || Array.isArray(poem)){
+        res.writeHead(400, {'Content-Type':'application/json; charset=utf-8'});
+        res.end(JSON.stringify({error:'Ожидался объект стихотворения'}));
+        return;
+      }
+
+      const title = typeof poem.title === 'string' ? poem.title.trim() : '';
+      const text = typeof poem.text === 'string' ? poem.text.trim() : '';
+      if(!title || !text){
+        res.writeHead(400, {'Content-Type':'application/json; charset=utf-8'});
+        res.end(JSON.stringify({error:'Название и текст обязательны'}));
+        return;
+      }
+
+      try{
+        const poems = readPoems();
+        poems.push({title, text});
+        writePoems(poems);
+        res.writeHead(201, {'Content-Type':'application/json; charset=utf-8'});
+        res.end(JSON.stringify({poems}));
+      }catch(error){
+        console.error('Failed to save poem:', error);
+        res.writeHead(500, {'Content-Type':'application/json; charset=utf-8'});
+        res.end(JSON.stringify({error:'Не удалось сохранить стихотворение'}));
+      }
+    }).catch(error=>{
+      if(!res.headersSent){
+        const status = error.message === 'Request body is too large' ? 413 : 400;
+        res.writeHead(status, {'Content-Type':'application/json; charset=utf-8'});
+        res.end(JSON.stringify({error:status === 413 ? 'Запрос слишком большой' : 'Не удалось прочитать запрос'}));
+      }
+    });
+    return;
+  }
 
   if(req.url === '/api/test'){
     res.writeHead(200,{
