@@ -16,7 +16,10 @@ const GITHUB_REPOSITORY = 'Rinna1oveu/posmertie-admin-test';
 const GITHUB_BRANCH = 'poems-data';
 const GITHUB_FILE_PATH = 'data/poems.json';
 const GITHUB_FILE_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${GITHUB_FILE_PATH}`;
+const GITHUB_CYCLES_FILE_PATH = 'data/cycles.json';
+const GITHUB_CYCLES_FILE_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${GITHUB_CYCLES_FILE_PATH}`;
 let poemWriteQueue = Promise.resolve();
+let cycleWriteQueue = Promise.resolve();
 
 async function initializeAdminPasswordVerifier(){
   let password = process.env.ADMIN_PASSWORD || '';
@@ -141,7 +144,7 @@ function getPoemId(poem, index){
   return `legacy-${crypto.createHash('sha256').update(signature).digest('hex').slice(0, 24)}`;
 }
 
-async function githubRequest(method, body){
+async function githubRequest(method, body, fileUrl=GITHUB_FILE_URL){
   const token = process.env.GITHUB_TOKEN;
   if(!token) throw githubApiError(503, 'GITHUB_TOKEN_MISSING');
 
@@ -162,8 +165,8 @@ async function githubRequest(method, body){
   }
 
   const url = method === 'GET'
-    ? `${GITHUB_FILE_URL}?ref=${encodeURIComponent(GITHUB_BRANCH)}`
-    : GITHUB_FILE_URL;
+    ? `${fileUrl}?ref=${encodeURIComponent(GITHUB_BRANCH)}`
+    : fileUrl;
   return fetch(url, options);
 }
 
@@ -250,6 +253,102 @@ function validatePoem(input){
 function sendPoemMutationError(res, error){
   if(error.code === 'POEM_NOT_FOUND'){
     sendJson(res, 404, {error:'Стихотворение не найдено'});
+    return;
+  }
+  sendGitHubError(res, error, 'write');
+}
+
+function getCycleId(cycle, index){
+  if(typeof cycle.id === 'string' && cycle.id) return cycle.id;
+  const legacyData = {...cycle};
+  delete legacyData.id;
+  const signature = `${index}\0${JSON.stringify(legacyData)}`;
+  return `legacy-cycle-${crypto.createHash('sha256').update(signature).digest('hex').slice(0, 24)}`;
+}
+
+async function readCyclesFromGitHub(){
+  const response = await githubRequest('GET', undefined, GITHUB_CYCLES_FILE_URL);
+  if(response.status === 404) return {cycles:[], sha:null};
+  if(!response.ok) throw githubApiError(response.status);
+
+  try{
+    const file = await response.json();
+    if(file.encoding !== 'base64' || typeof file.content !== 'string' || typeof file.sha !== 'string'){
+      throw new Error('Invalid file response');
+    }
+    const content = Buffer.from(file.content.replace(/\s/g, ''), 'base64').toString('utf8');
+    const cycles = JSON.parse(content);
+    if(!Array.isArray(cycles) || cycles.some(cycle=>!cycle || typeof cycle !== 'object' || Array.isArray(cycle))){
+      throw new Error('Invalid cycles data');
+    }
+    const cyclesWithIds = cycles.map((cycle,index)=>({
+      ...cycle,
+      id:getCycleId(cycle,index),
+      poemIds:Array.isArray(cycle.poemIds) ? cycle.poemIds.filter(id=>typeof id === 'string') : []
+    }));
+    return {cycles:cyclesWithIds, sha:file.sha};
+  }catch{
+    throw githubApiError(502, 'INVALID_GITHUB_CYCLES_FILE');
+  }
+}
+
+async function writeCyclesToGitHub(cycles, sha, message='Update cycles from admin panel'){
+  const body = {
+    message,
+    content:Buffer.from(JSON.stringify(cycles, null, 2) + '\n', 'utf8').toString('base64'),
+    branch:GITHUB_BRANCH
+  };
+  if(sha) body.sha = sha;
+
+  const response = await githubRequest('PUT', body, GITHUB_CYCLES_FILE_URL);
+  if(!response.ok) throw githubApiError(response.status);
+}
+
+async function mutateCyclesOnGitHub(mutate, message){
+  for(let attempt=0;attempt<3;attempt++){
+    const current = await readCyclesFromGitHub();
+    const cycles = mutate(current.cycles);
+
+    try{
+      await writeCyclesToGitHub(cycles, current.sha, message);
+      return cycles;
+    }catch(error){
+      if((error.status === 409 || error.status === 422) && attempt < 2) continue;
+      throw error;
+    }
+  }
+
+  throw githubApiError(409, 'GITHUB_CYCLES_WRITE_CONFLICT');
+}
+
+function queueCycleMutation(mutate, message){
+  const operation = cycleWriteQueue.then(()=>mutateCyclesOnGitHub(mutate, message));
+  cycleWriteQueue = operation.then(()=>undefined, ()=>undefined);
+  return operation;
+}
+
+function validateCycle(input, existingPoemIds){
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  const description = typeof input.description === 'string' ? input.description.trim() : '';
+  const status = input.status === undefined ? 'published' : input.status;
+  const cover = typeof input.cover === 'string' ? input.cover.trim() : '';
+  const poemIds = input.poemIds;
+
+  if(!title) return {error:'Название цикла обязательно'};
+  if(title.length > 300 || description.length > 10000) return {error:'Название или описание цикла слишком длинные'};
+  if(status !== 'published' && status !== 'draft') return {error:'Неизвестный статус цикла'};
+  const hasUnsupportedScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(cover) && !cover.startsWith('http://') && !cover.startsWith('https://');
+  if(cover.length > 2048 || (cover && (hasUnsupportedScheme || !(cover.startsWith('http://') || cover.startsWith('https://') || cover.startsWith('/') || /^[a-zA-Z0-9._-]/.test(cover))))) return {error:'Укажите ссылку или путь к обложке'};
+  if(!Array.isArray(poemIds) || poemIds.length > 500 || poemIds.some(id=>typeof id !== 'string' || !id)) return {error:'Неверный список стихотворений'};
+  if(new Set(poemIds).size !== poemIds.length) return {error:'Стихотворение уже добавлено в цикл'};
+  if(poemIds.some(id=>!existingPoemIds.has(id))) return {error:'В цикле могут быть только существующие стихотворения'};
+
+  return {cycle:{title,description,status,cover,poemIds:[...poemIds]}};
+}
+
+function sendCycleMutationError(res, error){
+  if(error.code === 'CYCLE_NOT_FOUND'){
+    sendJson(res, 404, {error:'Цикл не найден'});
     return;
   }
   sendGitHubError(res, error, 'write');
@@ -574,6 +673,42 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .preview-figure img{display:block;max-width:100%;max-height:440px;margin:0 auto;object-fit:contain}
 .preview-figure figcaption{margin-top:10px;color:#a58a91;text-align:center;font:italic 13px Georgia,"Times New Roman",serif}
 .preview-status{margin-top:26px;color:#a83b53;font-size:9px;font-weight:700;letter-spacing:.2em;text-transform:uppercase}
+.cycle-picker{display:flex;align-items:stretch;gap:9px}
+.cycle-picker select{flex:1;min-width:0;padding:11px 12px;background:#0b0709;color:#f5eff0;border:1px solid #51202a;border-radius:2px}
+.cycle-picker button:disabled{opacity:.45;cursor:not-allowed}
+.cycle-selection-heading{display:flex;justify-content:space-between;gap:12px;margin:22px 0 8px;color:#f0e4e7;font-size:13px;font-weight:700}
+.cycle-selection-heading span{color:#90777e;font-size:11px;font-weight:400}
+.cycle-selected-list{display:grid;gap:7px}
+.cycle-selected-row{display:grid;grid-template-columns:34px minmax(0,1fr) auto;align-items:center;gap:10px;padding:9px 10px;border:1px solid #401722;background:#12090d}
+.cycle-order{color:#a83d55;font:11px Georgia,serif;text-align:center}
+.cycle-poem-name{overflow:hidden;color:#e9dce0;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.cycle-poem-missing{color:#d77b88}
+.cycle-order-actions{display:flex;gap:5px}
+.cycle-order-actions button{width:29px;height:29px;padding:0;border:1px solid #612034;border-radius:2px;background:#1a0b10;color:#dbaab3}
+.cycle-order-actions button:hover:not(:disabled){border-color:var(--accent);background:#3b0e1b;color:#fff}
+.cycle-order-actions button:disabled{opacity:.35;cursor:not-allowed}
+.cycle-list{display:grid;gap:12px}
+.cycle-card{display:grid;grid-template-columns:100px minmax(0,1fr);gap:17px;padding:17px 0;border-bottom:1px solid #401722}
+.cycle-card:last-child{border-bottom:0}
+.cycle-card-cover{width:100px;height:100px;object-fit:cover;border:1px solid #672034;background:#0c0709}
+.cycle-card-cover[hidden]{display:none}
+.cycle-card-body{min-width:0}
+.cycle-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.cycle-card-description{margin:8px 0 0;color:#aa969c;font:14px/1.55 Georgia,"Times New Roman",serif;white-space:pre-wrap}
+.cycle-card-count{margin-top:8px;color:#946c75;font-size:10px;letter-spacing:.12em;text-transform:uppercase}
+.cycle-card-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:13px}
+.cycle-card-actions button{padding:7px 10px;font-size:12px}
+.cycle-card-actions .btn-secondary:after{content:""}
+.cycle-empty{padding:20px 0;color:#a08a91;font:italic 15px Georgia,"Times New Roman",serif}
+.cycle-preview-content{position:relative;max-width:760px;margin:0 auto;padding:clamp(28px,6vw,64px)}
+.cycle-preview-cover{display:block;max-width:100%;max-height:300px;margin:0 auto 30px;object-fit:contain}
+.cycle-preview-cover[hidden]{display:none}
+.cycle-preview-content h2{margin:13px 0;color:#fff1f3;font:700 clamp(32px,5vw,50px)/1.1 Georgia,"Times New Roman",serif}
+.cycle-preview-description{color:#c9b5bb;font:italic 16px/1.7 Georgia,"Times New Roman",serif;white-space:pre-wrap}
+.cycle-preview-poems{display:grid;margin-top:30px;border-top:1px solid #501725}
+.cycle-preview-poem{padding:16px 0;border-bottom:1px solid #501725}
+.cycle-preview-poem strong{display:block;color:#f2e4e7;font:600 19px Georgia,"Times New Roman",serif}
+.cycle-preview-poem p{margin:6px 0 0;color:#a9959a;font:14px/1.55 Georgia,"Times New Roman",serif;white-space:pre-wrap}
 .poem-list .item{padding:18px 0;border-bottom:1px solid #401722}
 .poem-list .item:last-child{border-bottom:0}
 .item-title{margin-bottom:6px;color:#f4e9eb;font:600 21px Georgia,"Times New Roman",serif}
@@ -609,6 +744,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
   .hero-mascot{height:100px;max-width:24%}
   .editor-fields{grid-template-columns:1fr}
   .editor-field-wide{grid-column:auto}
+  .cycle-picker{flex-direction:column}
   .stats{gap:9px}
   .stat-card{padding:15px 13px}
   .stat-top{align-items:flex-start;gap:5px;font-size:11px}
@@ -624,6 +760,9 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
   .hero-mascot{height:76px;max-width:100%;margin:14px 0 0 auto}
   .preview-overlay{padding:10px}
   .preview-body{font-size:16px}
+  .cycle-card{grid-template-columns:72px minmax(0,1fr);gap:12px}
+  .cycle-card-cover{width:72px;height:72px}
+  .cycle-selection-heading{flex-direction:column;gap:3px}
 }
 @media(max-width:420px){
   .nav-link{gap:7px;padding:8px;font-size:12px}
@@ -682,7 +821,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
           <p>Здесь собраны тексты Посмертия Ринны. Продолжайте работу с архивом или начните новую запись.</p>
           <div class="quick-actions">
             <button class="btn-secondary" type="button" onclick="startPoem()"><span class="plus">＋</span>Новый стих</button>
-            <button class="btn-secondary" type="button" onclick="showSection('cycles')"><span class="plus">＋</span>Новый цикл</button>
+          <button class="btn-secondary" type="button" onclick="startCycle()"><span class="plus">＋</span>Новый цикл</button>
             <button class="btn-secondary" type="button" onclick="showSection('prose')"><span class="plus">＋</span>Новая проза</button>
           </div>
         </div>
@@ -774,9 +913,69 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
     </div>
     </section>
     <section class="section" id="cycles">
-      <div class="page-heading"><div class="eyebrow">Структура архива</div><h1>Циклы</h1><div class="subtitle">Тематические собрания стихотворений</div></div>
-      <div class="panel placeholder-panel"><div class="placeholder-glyph" aria-hidden="true">◌</div><h2>Раздел циклов готовится</h2><p>Здесь появятся тематические подборки и поэтические циклы. Пока можно продолжить работу со стихотворениями.</p></div>
+      <div class="section-top">
+        <div class="page-heading"><div class="eyebrow">Структура архива</div><h1>Циклы</h1><div class="subtitle">Тематические собрания стихотворений</div></div>
+        <button class="btn add" type="button" onclick="openCycleForm()">＋ Новый цикл</button>
+      </div>
+      <div class="panel cycle-panel">
+        <form id="cycle-form" onsubmit="saveCycle(event)" style="display:none">
+          <input id="cycle-id" type="hidden">
+          <div class="panel-heading"><h2 id="cycle-form-heading">Новый цикл</h2></div>
+          <div class="editor-fields">
+            <div class="editor-field editor-field-wide">
+              <label for="cycle-title">Название</label>
+              <input id="cycle-title" name="title" required maxlength="300" placeholder="Название цикла">
+            </div>
+            <div class="editor-field editor-field-wide">
+              <label for="cycle-description">Описание</label>
+              <textarea id="cycle-description" name="description" rows="4" maxlength="10000" placeholder="Коротко о цикле"></textarea>
+            </div>
+            <div class="editor-field">
+              <label for="cycle-status">Статус</label>
+              <select id="cycle-status" name="status">
+                <option value="published">Опубликован</option>
+                <option value="draft">Черновик</option>
+              </select>
+            </div>
+            <div class="editor-field">
+              <label for="cycle-cover">Обложка — ссылка или путь</label>
+              <input id="cycle-cover" name="cover" type="text" inputmode="url" maxlength="2048" placeholder="/images/cycle.jpg или https://…">
+            </div>
+            <div class="editor-field editor-field-wide">
+              <label for="cycle-poem-picker">Добавить существующее стихотворение</label>
+              <div class="cycle-picker">
+                <select id="cycle-poem-picker" aria-label="Выберите стихотворение"></select>
+                <button class="btn-secondary" id="cycle-add-poem" type="button" onclick="addPoemToCycle()">Добавить стих</button>
+              </div>
+              <div class="cycle-selection-heading">Стихи в цикле <span>Порядок можно менять кнопками ↑ и ↓</span></div>
+              <div class="cycle-selected-list" id="cycle-selected-poems"></div>
+            </div>
+          </div>
+          <div class="editor-actions">
+            <button class="btn" type="submit">Сохранить цикл</button>
+            <button class="btn-secondary" type="button" onclick="previewCycleForm()">Предпросмотр</button>
+            <button class="btn-secondary" type="button" onclick="closeCycleForm()">Закрыть</button>
+            <button class="btn-danger" id="cycle-delete" type="button" onclick="deleteEditingCycle()" hidden>Удалить цикл</button>
+          </div>
+        </form>
+        <div class="error" id="cycle-error" role="alert"></div>
+        <div class="cycle-list" id="cycle-list"></div>
+      </div>
+      <div class="preview-overlay" id="cycle-preview" hidden onclick="if(event.target===this)closeCyclePreview()">
+        <article class="preview-dialog cycle-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="cycle-preview-title">
+          <div class="preview-toolbar"><span>PREVIEW / CYCLE</span><button class="btn-secondary" type="button" onclick="closeCyclePreview()">Закрыть <span aria-hidden="true">×</span></button></div>
+          <div class="cycle-preview-content">
+            <img class="cycle-preview-cover" id="cycle-preview-cover" alt="" hidden>
+            <div class="preview-index">ПОСМЕРТИЕ РИННЫ · ЦИКЛ</div>
+            <h2 id="cycle-preview-title"></h2>
+            <p class="cycle-preview-description" id="cycle-preview-description"></p>
+            <div class="cycle-preview-poems" id="cycle-preview-poems"></div>
+            <div class="preview-status" id="cycle-preview-status"></div>
+          </div>
+        </article>
+      </div>
     </section>
+    
     <section class="section" id="prose">
       <div class="page-heading"><div class="eyebrow">Другие тексты</div><h1>Проза</h1><div class="subtitle">Рассказы и произведения в прозе</div></div>
       <div class="panel placeholder-panel"><div class="placeholder-glyph" aria-hidden="true">▤</div><h2>Раздел прозы готовится</h2><p>Здесь будет собрана проза Посмертия Ринны. Сейчас раздел доступен как часть навигации архива.</p></div>
@@ -791,6 +990,11 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 let poems = [];
 let poemsLoaded = false;
 const viewNames = {dashboard:'Главная',poems:'Стихи',cycles:'Циклы',prose:'Проза',settings:'Настройки'};
+let cycles = [];
+let cyclesLoaded = false;
+let cyclesLoadPromise = null;
+let editingCycleId = '';
+let editingCyclePoemIds = [];
 
 async function loadPoems(){
   setStorageStatus('checking');
@@ -1091,6 +1295,379 @@ function renderRecentChanges(){
   });
 }
 
+async function loadPoemsForCycles(){
+  if(poemsLoaded) return;
+  const response = await fetch('/api/poems');
+  if(!response.ok) throw new Error('Не удалось загрузить список стихотворений');
+  poems = await response.json();
+  poemsLoaded = true;
+  renderPoems();
+}
+
+async function loadCycles(){
+  if(cyclesLoaded) return;
+  if(cyclesLoadPromise) return cyclesLoadPromise;
+  cyclesLoadPromise = (async()=>{
+    try{
+      await loadPoemsForCycles();
+      const response = await fetch('/api/cycles');
+      const result = await response.json();
+      if(!response.ok) throw new Error(result.error || 'Не удалось загрузить циклы');
+      cycles = result.cycles;
+      cyclesLoaded = true;
+      renderCycles();
+    }catch(error){
+      showCycleError(error.message);
+    }finally{
+      cyclesLoadPromise = null;
+    }
+  })();
+  return cyclesLoadPromise;
+}
+
+function clearCycleError(){
+  const error = document.getElementById('cycle-error');
+  error.textContent = '';
+  error.style.display = 'none';
+}
+function showCycleError(message){
+  const error = document.getElementById('cycle-error');
+  error.textContent = message;
+  error.style.display = 'block';
+}
+async function startCycle(){
+  showSection('cycles');
+  await openCycleForm();
+}
+async function openCycleForm(){
+  await loadCycles();
+  const form = document.getElementById('cycle-form');
+  form.reset();
+  editingCycleId = '';
+  editingCyclePoemIds = [];
+  document.getElementById('cycle-id').value = '';
+  document.getElementById('cycle-form-heading').textContent = 'Новый цикл';
+  document.getElementById('cycle-status').value = 'draft';
+  document.getElementById('cycle-delete').hidden = true;
+  clearCycleError();
+  renderCyclePoemPicker();
+  renderSelectedCyclePoems();
+  form.style.display = 'block';
+  document.getElementById('cycle-title').focus();
+}
+function closeCycleForm(){
+  const form = document.getElementById('cycle-form');
+  form.reset();
+  form.style.display = 'none';
+  editingCycleId = '';
+  editingCyclePoemIds = [];
+  document.getElementById('cycle-id').value = '';
+  document.getElementById('cycle-delete').hidden = true;
+  renderCyclePoemPicker();
+  renderSelectedCyclePoems();
+}
+function editCycle(cycle){
+  showSection('cycles');
+  editingCycleId = cycle.id;
+  editingCyclePoemIds = [...(cycle.poemIds || [])];
+  document.getElementById('cycle-id').value = cycle.id;
+  document.getElementById('cycle-form-heading').textContent = 'Редактировать цикл';
+  document.getElementById('cycle-title').value = cycle.title || '';
+  document.getElementById('cycle-description').value = cycle.description || '';
+  document.getElementById('cycle-status').value = cycle.status === 'published' ? 'published' : 'draft';
+  document.getElementById('cycle-cover').value = cycle.cover || '';
+  document.getElementById('cycle-delete').hidden = false;
+  clearCycleError();
+  renderCyclePoemPicker();
+  renderSelectedCyclePoems();
+  document.getElementById('cycle-form').style.display = 'block';
+  document.getElementById('cycle-title').focus();
+}
+function renderCyclePoemPicker(){
+  const picker = document.getElementById('cycle-poem-picker');
+  const addButton = document.getElementById('cycle-add-poem');
+  if(!picker || !addButton) return;
+  picker.replaceChildren();
+  const available = poems.filter(poem=>poem.id && !editingCyclePoemIds.includes(poem.id));
+  if(!available.length){
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = poems.length ? 'Все стихотворения уже добавлены' : 'Сначала добавьте стихотворение';
+    picker.append(option);
+    addButton.disabled = true;
+    return;
+  }
+  available.forEach(poem=>{
+    const option = document.createElement('option');
+    option.value = poem.id;
+    option.textContent = poem.title || 'Без названия';
+    picker.append(option);
+  });
+  addButton.disabled = false;
+}
+function addPoemToCycle(){
+  const id = document.getElementById('cycle-poem-picker').value;
+  if(!id || editingCyclePoemIds.includes(id)) return;
+  if(!poems.some(poem=>poem.id === id)) return;
+  editingCyclePoemIds.push(id);
+  renderCyclePoemPicker();
+  renderSelectedCyclePoems();
+}
+function renderSelectedCyclePoems(){
+  const list = document.getElementById('cycle-selected-poems');
+  if(!list) return;
+  list.replaceChildren();
+  if(!editingCyclePoemIds.length){
+    const empty = document.createElement('div');
+    empty.className = 'cycle-empty';
+    empty.textContent = 'В цикле пока нет стихотворений.';
+    list.append(empty);
+    return;
+  }
+  editingCyclePoemIds.forEach((id,index)=>{
+    const poem = poems.find(item=>item.id === id);
+    const row = document.createElement('div');
+    row.className = 'cycle-selected-row';
+    const order = document.createElement('span');
+    order.className = 'cycle-order';
+    order.textContent = String(index + 1).padStart(2,'0');
+    const title = document.createElement('span');
+    title.className = 'cycle-poem-name' + (poem ? '' : ' cycle-poem-missing');
+    title.textContent = poem ? poem.title : 'Стихотворение не найдено — удалите его из цикла';
+    const controls = document.createElement('div');
+    controls.className = 'cycle-order-actions';
+    const moveUp = document.createElement('button');
+    moveUp.type = 'button';
+    moveUp.title = 'Переместить вверх';
+    moveUp.setAttribute('aria-label','Переместить выше');
+    moveUp.textContent = '↑';
+    moveUp.disabled = index === 0;
+    moveUp.addEventListener('click',()=>moveCyclePoem(index,-1));
+    const moveDown = document.createElement('button');
+    moveDown.type = 'button';
+    moveDown.title = 'Переместить вниз';
+    moveDown.setAttribute('aria-label','Переместить ниже');
+    moveDown.textContent = '↓';
+    moveDown.disabled = index === editingCyclePoemIds.length - 1;
+    moveDown.addEventListener('click',()=>moveCyclePoem(index,1));
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.title = 'Убрать из цикла';
+    remove.setAttribute('aria-label','Убрать стихотворение из цикла');
+    remove.textContent = '×';
+    remove.addEventListener('click',()=>removePoemFromCycle(index));
+    controls.append(moveUp,moveDown,remove);
+    row.append(order,title,controls);
+    list.append(row);
+  });
+}
+function moveCyclePoem(index,offset){
+  const destination = index + offset;
+  if(destination < 0 || destination >= editingCyclePoemIds.length) return;
+  const updated = [...editingCyclePoemIds];
+  const [id] = updated.splice(index,1);
+  updated.splice(destination,0,id);
+  editingCyclePoemIds = updated;
+  renderCyclePoemPicker();
+  renderSelectedCyclePoems();
+}
+function removePoemFromCycle(index){
+  editingCyclePoemIds.splice(index,1);
+  renderCyclePoemPicker();
+  renderSelectedCyclePoems();
+}
+async function saveCycle(event){
+  event.preventDefault();
+  const form = event.currentTarget;
+  const cycle = {
+    title:document.getElementById('cycle-title').value.trim(),
+    description:document.getElementById('cycle-description').value.trim(),
+    status:document.getElementById('cycle-status').value,
+    cover:document.getElementById('cycle-cover').value.trim(),
+    poemIds:[...editingCyclePoemIds]
+  };
+  const payload = editingCycleId
+    ? {action:'update',id:editingCycleId,cycle}
+    : {action:'create',cycle};
+  const button = form.querySelector('[type="submit"]');
+  button.disabled = true;
+  try{
+    const response = await fetch('/api/cycles', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    const result = await response.json();
+    if(!response.ok) throw new Error(result.error || 'Не удалось сохранить цикл');
+    cycles = result.cycles;
+    cyclesLoaded = true;
+    renderCycles();
+    closeCycleForm();
+    clearCycleError();
+  }catch(error){
+    showCycleError(error.message);
+  }finally{
+    button.disabled = false;
+  }
+}
+function deleteEditingCycle(){
+  if(!editingCycleId) return;
+  const cycle = cycles.find(item=>item.id === editingCycleId);
+  deleteCycle(editingCycleId,cycle && cycle.title);
+}
+async function deleteCycle(id,title){
+  if(!window.confirm('Удалить цикл «' + (title || 'Без названия') + '»? Сами стихотворения останутся в архиве.')) return;
+  try{
+    const response = await fetch('/api/cycles', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'delete',id})
+    });
+    const result = await response.json();
+    if(!response.ok) throw new Error(result.error || 'Не удалось удалить цикл');
+    cycles = result.cycles;
+    cyclesLoaded = true;
+    renderCycles();
+    if(editingCycleId === id) closeCycleForm();
+    closeCyclePreview();
+    clearCycleError();
+  }catch(error){
+    showCycleError(error.message);
+  }
+}
+function cyclePoemCountLabel(count){
+  const lastTwo = count % 100;
+  const last = count % 10;
+  if(lastTwo >= 11 && lastTwo <= 14) return count + ' стихотворений';
+  if(last === 1) return count + ' стихотворение';
+  if(last >= 2 && last <= 4) return count + ' стихотворения';
+  return count + ' стихотворений';
+}
+function renderCycles(){
+  const list = document.getElementById('cycle-list');
+  list.replaceChildren();
+  document.getElementById('cycle-count').textContent = String(cycles.length);
+  if(!cycles.length){
+    const empty = document.createElement('div');
+    empty.className = 'cycle-empty';
+    empty.textContent = 'Циклов пока нет. Создайте первый цикл и добавьте в него стихотворения из архива.';
+    list.append(empty);
+    return;
+  }
+  cycles.forEach(cycle=>{
+    const card = document.createElement('article');
+    card.className = 'cycle-card';
+    const cover = document.createElement('img');
+    cover.className = 'cycle-card-cover';
+    cover.alt = '';
+    const source = safeImageSource(cycle.cover);
+    if(source){
+      cover.src = source;
+      cover.onerror = ()=>{cover.hidden = true;};
+    }else{
+      cover.hidden = true;
+    }
+    const body = document.createElement('div');
+    body.className = 'cycle-card-body';
+    const head = document.createElement('div');
+    head.className = 'cycle-card-head';
+    const title = document.createElement('div');
+    title.className = 'item-title';
+    title.textContent = cycle.title || 'Без названия';
+    const status = document.createElement('span');
+    status.className = 'poem-status' + (cycle.status === 'draft' ? ' draft' : '');
+    status.textContent = cycle.status === 'published' ? 'Опубликован' : 'Черновик';
+    head.append(title,status);
+    const description = document.createElement('p');
+    description.className = 'cycle-card-description';
+    description.textContent = cycle.description || 'Описание не добавлено.';
+    const count = document.createElement('div');
+    count.className = 'cycle-card-count';
+    count.textContent = cyclePoemCountLabel((cycle.poemIds || []).length);
+    const actions = document.createElement('div');
+    actions.className = 'cycle-card-actions';
+    const preview = document.createElement('button');
+    preview.className = 'btn-secondary';
+    preview.type = 'button';
+    preview.textContent = 'Предпросмотр';
+    preview.addEventListener('click',()=>openCyclePreview(cycle));
+    const edit = document.createElement('button');
+    edit.className = 'btn-secondary';
+    edit.type = 'button';
+    edit.textContent = 'Изменить';
+    edit.addEventListener('click',()=>editCycle(cycle));
+    const remove = document.createElement('button');
+    remove.className = 'btn-danger';
+    remove.type = 'button';
+    remove.textContent = 'Удалить';
+    remove.addEventListener('click',()=>deleteCycle(cycle.id,cycle.title));
+    actions.append(preview,edit,remove);
+    body.append(head,description,count,actions);
+    card.append(cover,body);
+    list.append(card);
+  });
+}
+function fillCyclePreview(cycle){
+  document.getElementById('cycle-preview-title').textContent = cycle.title || 'Без названия';
+  document.getElementById('cycle-preview-description').textContent = cycle.description || '';
+  document.getElementById('cycle-preview-status').textContent = cycle.status === 'published' ? 'Опубликован' : 'Черновик';
+  const cover = document.getElementById('cycle-preview-cover');
+  const source = safeImageSource(cycle.cover);
+  cover.onerror = ()=>{cover.hidden = true;};
+  if(source){
+    cover.src = source;
+    cover.hidden = false;
+  }else{
+    cover.removeAttribute('src');
+    cover.hidden = true;
+  }
+  const list = document.getElementById('cycle-preview-poems');
+  list.replaceChildren();
+  (cycle.poemIds || []).forEach((id,index)=>{
+    const poem = poems.find(item=>item.id === id);
+    const entry = document.createElement('article');
+    entry.className = 'cycle-preview-poem';
+    const title = document.createElement('strong');
+    title.textContent = String(index + 1).padStart(2,'0') + '  /  ' + (poem ? poem.title : 'Стихотворение не найдено');
+    entry.append(title);
+    if(poem){
+      const excerpt = document.createElement('p');
+      const text = (poem.text || '').trim();
+      excerpt.textContent = text.length > 260 ? text.slice(0,260) + '…' : text;
+      entry.append(excerpt);
+    }
+    list.append(entry);
+  });
+  if(!(cycle.poemIds || []).length){
+    const empty = document.createElement('div');
+    empty.className = 'cycle-empty';
+    empty.textContent = 'В цикле пока нет стихотворений.';
+    list.append(empty);
+  }
+  document.getElementById('cycle-preview').hidden = false;
+}
+function previewCycleForm(){
+  const title = document.getElementById('cycle-title').value.trim();
+  if(!title){
+    showCycleError('Добавьте название, чтобы открыть предпросмотр.');
+    return;
+  }
+  clearCycleError();
+  fillCyclePreview({
+    title,
+    description:document.getElementById('cycle-description').value.trim(),
+    status:document.getElementById('cycle-status').value,
+    cover:document.getElementById('cycle-cover').value.trim(),
+    poemIds:[...editingCyclePoemIds]
+  });
+}
+function openCyclePreview(cycle){
+  fillCyclePreview(cycle);
+}
+function closeCyclePreview(){
+  document.getElementById('cycle-preview').hidden = true;
+}
+
 async function login(){
   const user = document.getElementById('user').value;
   const pass = document.getElementById('pass').value;
@@ -1153,6 +1730,7 @@ function show(id,button){
   const activeButton = button || document.querySelector('.nav-link[data-view="' + id + '"]');
   if(activeButton) activeButton.classList.add('active');
   document.getElementById('view-title').textContent = viewNames[id] || 'Архив';
+  if(id === 'cycles') loadCycles();
 }
 
 restoreSession();
@@ -1352,6 +1930,129 @@ const server = http.createServer((req, res) => {
         if(!res.headersSent){
           const status = error.message === 'Request body is too large' ? 413 : 400;
           sendJson(res, status, {error:status === 413 ? 'Запрос слишком большой' : 'Не удалось прочитать запрос'});
+        }
+      });
+    }).catch(()=>sendJson(res, 401, {error:'Требуется вход'}));
+    return;
+  }
+
+  if(req.url === '/api/cycles' && req.method === 'GET'){
+    getSession(req).then(session=>{
+      if(!session){
+        sendJson(res, 401, {error:'Требуется вход'});
+        return;
+      }
+
+      readCyclesFromGitHub().then(({cycles})=>{
+        sendJson(res, 200, {cycles});
+      }).catch(error=>sendGitHubError(res,error,'read'));
+    }).catch(()=>sendJson(res, 401, {error:'Требуется вход'}));
+    return;
+  }
+
+  if(req.url === '/api/cycles' && req.method === 'POST'){
+    if(!isSameOrigin(req)){
+      sendJson(res, 403, {error:'Запрос отклонён'});
+      return;
+    }
+
+    getSession(req).then(session=>{
+      if(!session){
+        sendJson(res, 401, {error:'Требуется вход'});
+        return;
+      }
+
+      readRequestBody(req).then(async body=>{
+        let payload;
+        try{
+          payload = JSON.parse(body);
+        }catch{
+          sendJson(res, 400, {error:'Некорректный JSON'});
+          return;
+        }
+
+        if(!payload || typeof payload !== 'object' || Array.isArray(payload)){
+          sendJson(res, 400, {error:'Ожидался объект цикла'});
+          return;
+        }
+
+        const action = payload.action || 'create';
+        if(action === 'delete'){
+          const id = typeof payload.id === 'string' ? payload.id : '';
+          if(!id){
+            sendJson(res, 400, {error:'Не указан цикл для удаления'});
+            return;
+          }
+          queueCycleMutation(cycles=>{
+            const index = cycles.findIndex((cycle,position)=>getCycleId(cycle,position) === id);
+            if(index < 0){
+              const error = new Error('Cycle not found');
+              error.code = 'CYCLE_NOT_FOUND';
+              throw error;
+            }
+            return cycles.filter((_,position)=>position !== index);
+          },'Delete cycle from admin panel').then(cycles=>{
+            sendJson(res, 200, {cycles});
+          }).catch(error=>sendCycleMutationError(res,error));
+          return;
+        }
+
+        if(action !== 'create' && action !== 'update'){
+          sendJson(res, 400, {error:'Неизвестное действие с циклом'});
+          return;
+        }
+
+        const input = payload.cycle;
+        if(!input || typeof input !== 'object' || Array.isArray(input)){
+          sendJson(res, 400, {error:'Не указаны данные цикла'});
+          return;
+        }
+        const id = typeof payload.id === 'string' ? payload.id : '';
+        if(action === 'update' && !id){
+          sendJson(res, 400, {error:'Не указан цикл для изменения'});
+          return;
+        }
+
+        let existingPoemIds;
+        try{
+          const currentPoems = await readPoemsFromGitHub();
+          existingPoemIds = new Set(currentPoems.poems.map((poem,index)=>getPoemId(poem,index)));
+        }catch(error){
+          sendGitHubError(res,error,'read');
+          return;
+        }
+
+        const validation = validateCycle(input,existingPoemIds);
+        if(validation.error){
+          sendJson(res, 400, {error:validation.error});
+          return;
+        }
+
+        if(action === 'create'){
+          const newCycle = {...validation.cycle,id:crypto.randomUUID()};
+          queueCycleMutation(cycles=>[...cycles,newCycle],'Create cycle from admin panel').then(cycles=>{
+            sendJson(res, 201, {cycles});
+          }).catch(error=>sendCycleMutationError(res,error));
+          return;
+        }
+
+        queueCycleMutation(cycles=>{
+          const index = cycles.findIndex((cycle,position)=>getCycleId(cycle,position) === id);
+          if(index < 0){
+            const error = new Error('Cycle not found');
+            error.code = 'CYCLE_NOT_FOUND';
+            throw error;
+          }
+          const updated = cycles.slice();
+          updated[index] = {...updated[index],...validation.cycle,id:getCycleId(updated[index],index)};
+          return updated;
+        },'Edit cycle from admin panel').then(cycles=>{
+          sendJson(res, 200, {cycles});
+        }).catch(error=>sendCycleMutationError(res,error));
+      }).catch(error=>{
+        if(!res.headersSent){
+          const status = error.message === 'Request body is too large' ? 413 : 400;
+          sendJson(res,status,{error:status === 413 ? 'Запрос слишком большой' : 'Не удалось прочитать запрос'});
         }
       });
     }).catch(()=>sendJson(res, 401, {error:'Требуется вход'}));
