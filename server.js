@@ -1,6 +1,112 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const {promisify} = require('util');
+const {sealData, unsealData} = require('iron-session');
+
+const scrypt = promisify(crypto.scrypt);
+const SESSION_COOKIE = 'admin_session';
+const SESSION_TTL_SECONDS = 8 * 60 * 60;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 5;
+const loginAttempts = new Map();
+
+function getSessionPassword(){
+  return process.env.ADMIN_SESSION_SECRET || '';
+}
+
+function getSessionCookie(req){
+  const cookies = (req.headers.cookie || '').split(';');
+  const prefix = SESSION_COOKIE + '=';
+  const entry = cookies.find(cookie=>cookie.trim().startsWith(prefix));
+  if(!entry) return '';
+  try{
+    return decodeURIComponent(entry.trim().slice(prefix.length));
+  }catch{
+    return '';
+  }
+}
+
+function setSessionCookie(res, value, maxAge=SESSION_TTL_SECONDS){
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`);
+}
+
+async function getSession(req){
+  const cookie = getSessionCookie(req);
+  const password = getSessionPassword();
+  if(!cookie || password.length < 32) return null;
+
+  try{
+    const session = await unsealData(cookie, {password, ttl:SESSION_TTL_SECONDS});
+    if(session.username !== process.env.ADMIN_USERNAME) return null;
+    return session;
+  }catch{
+    return null;
+  }
+}
+
+function getClientIp(req){
+  const forwardedFor = req.headers['x-forwarded-for'];
+  if(typeof forwardedFor === 'string' && forwardedFor.trim()){
+    return forwardedFor.split(',')[0].trim().slice(0, 100);
+  }
+  return req.socket.remoteAddress || 'unknown';
+}
+
+function isSameOrigin(req){
+  const origin = req.headers.origin;
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  if(typeof origin !== 'string' || typeof host !== 'string') return false;
+
+  try{
+    const parsedOrigin = new URL(origin);
+    return parsedOrigin.protocol === 'https:' && parsedOrigin.host.toLowerCase() === host.toLowerCase();
+  }catch{
+    return false;
+  }
+}
+
+function getLoginAttempt(ip){
+  const now = Date.now();
+  for(const [key, attempt] of loginAttempts){
+    if(now - attempt.windowStartedAt >= LOGIN_WINDOW_MS) loginAttempts.delete(key);
+  }
+
+  let attempt = loginAttempts.get(ip);
+  if(!attempt || now - attempt.windowStartedAt >= LOGIN_WINDOW_MS){
+    attempt = {count:0, windowStartedAt:now};
+    loginAttempts.set(ip, attempt);
+    if(loginAttempts.size > 10000){
+      const oldestIp = loginAttempts.keys().next().value;
+      loginAttempts.delete(oldestIp);
+    }
+  }
+
+  return attempt;
+}
+
+async function verifyAdminPassword(password){
+  const encoded = process.env.ADMIN_PASSWORD || '';
+  const parts = encoded.split('$');
+  if(parts.length !== 6 || parts[0] !== 'scrypt' || parts[1] !== '32768' || parts[2] !== '8' || parts[3] !== '1') return false;
+
+  try{
+    const salt = Buffer.from(parts[4], 'base64url');
+    const expected = Buffer.from(parts[5], 'base64url');
+    if(salt.length !== 16 || expected.length !== 64) return false;
+
+    const actual = await scrypt(password, salt, 64, {N:32768, r:8, p:1, maxmem:64 * 1024 * 1024});
+    return crypto.timingSafeEqual(actual, expected);
+  }catch{
+    return false;
+  }
+}
+
+function sendJson(res, status, value){
+  res.writeHead(status, {'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store'});
+  res.end(JSON.stringify(value));
+}
 
 const dataDirectory = path.join(__dirname, 'data');
 const poemsFile = path.join(dataDirectory, 'poems.json');
@@ -589,24 +695,57 @@ function renderPoems(){
     list.append(item);
   });
 }
-function login(){
+async function login(){
   const user = document.getElementById('user').value;
   const pass = document.getElementById('pass').value;
   const error = document.getElementById('error');
 
-  if(user === 'admin' && pass === 'rinna'){
+  try{
+    const response = await fetch('/api/auth/login', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:user, password:pass})
+    });
+
+    if(!response.ok){
+      error.textContent = response.status === 429
+        ? 'Слишком много попыток входа. Попробуйте позже.'
+        : 'Неверный логин или пароль';
+      error.style.display='block';
+      return;
+    }
+
     document.getElementById('login').style.display='none';
     document.getElementById('app').style.display='block';
     error.style.display='none';
-    if(!poemsLoaded) loadPoems();
-  }else{
+    document.getElementById('pass').value='';
+    loadPoems();
+  }catch{
+    error.textContent = 'Не удалось выполнить вход. Попробуйте ещё раз.';
     error.style.display='block';
   }
 }
 
-function logout(){
-  document.getElementById('app').style.display='none';
-  document.getElementById('login').style.display='flex';
+async function restoreSession(){
+  try{
+    const response = await fetch('/api/auth/session');
+    if(!response.ok) return;
+    document.getElementById('login').style.display='none';
+    document.getElementById('app').style.display='block';
+    loadPoems();
+  }catch{}
+}
+
+async function logout(){
+  try{
+    await fetch('/api/auth/logout', {method:'POST'});
+  }catch{
+    // Return to the login screen even if the request fails.
+  }finally{
+    document.getElementById('app').style.display='none';
+    document.getElementById('login').style.display='flex';
+    document.getElementById('pass').value='';
+  }
 }
 
 function show(id,button){
@@ -620,6 +759,8 @@ function show(id,button){
 
   button.classList.add('active');
 }
+
+restoreSession();
 </script>
 
 </body>
@@ -628,62 +769,154 @@ function show(id,button){
 
 const server = http.createServer((req, res) => {
 
-  if(req.url === '/api/poems' && req.method === 'GET'){
-    try{
-      const poems = readPoems();
-      res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
-      res.end(JSON.stringify(poems));
-    }catch(error){
-      console.error('Failed to read poems:', error);
-      res.writeHead(500, {'Content-Type':'application/json; charset=utf-8'});
-      res.end(JSON.stringify({error:'Не удалось загрузить стихотворения'}));
+  if(req.url === '/api/auth/login' && req.method === 'POST'){
+    if(!isSameOrigin(req)){
+      sendJson(res, 403, {error:'Запрос отклонён'});
+      return;
     }
+
+    const ip = getClientIp(req);
+    const attempt = getLoginAttempt(ip);
+    if(attempt.count >= LOGIN_MAX_ATTEMPTS){
+      res.setHeader('Retry-After', Math.ceil((LOGIN_WINDOW_MS - (Date.now() - attempt.windowStartedAt)) / 1000));
+      sendJson(res, 429, {error:'Слишком много попыток входа. Попробуйте позже.'});
+      return;
+    }
+
+    if(!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD || getSessionPassword().length < 32){
+      sendJson(res, 503, {error:'Авторизация не настроена'});
+      return;
+    }
+
+    readRequestBody(req).then(async body=>{
+      let credentials;
+      try{
+        credentials = JSON.parse(body);
+      }catch{
+        attempt.count++;
+        sendJson(res, 400, {error:'Некорректный запрос'});
+        return;
+      }
+
+      const username = typeof credentials.username === 'string' ? credentials.username : '';
+      const password = typeof credentials.password === 'string' ? credentials.password : '';
+      if(Buffer.byteLength(username) > 256 || Buffer.byteLength(password) > 1024){
+        attempt.count++;
+        sendJson(res, 401, {error:'Неверный логин или пароль'});
+        return;
+      }
+      const passwordMatches = await verifyAdminPassword(password);
+      if(username !== process.env.ADMIN_USERNAME || !passwordMatches){
+        attempt.count++;
+        if(attempt.count >= LOGIN_MAX_ATTEMPTS){
+          res.setHeader('Retry-After', Math.ceil((LOGIN_WINDOW_MS - (Date.now() - attempt.windowStartedAt)) / 1000));
+          sendJson(res, 429, {error:'Слишком много попыток входа. Попробуйте позже.'});
+        }else{
+          sendJson(res, 401, {error:'Неверный логин или пароль'});
+        }
+        return;
+      }
+
+      loginAttempts.delete(ip);
+      const session = await sealData({username}, {password:getSessionPassword(), ttl:SESSION_TTL_SECONDS});
+      setSessionCookie(res, session);
+      sendJson(res, 200, {ok:true});
+    }).catch(()=>{
+      attempt.count++;
+      sendJson(res, 400, {error:'Не удалось обработать запрос'});
+    });
     return;
   }
 
-  if(req.url === '/api/poems' && req.method === 'POST'){
-    readRequestBody(req).then(body=>{
-      let poem;
-      try{
-        poem = JSON.parse(body);
-      }catch{
-        res.writeHead(400, {'Content-Type':'application/json; charset=utf-8'});
-        res.end(JSON.stringify({error:'Некорректный JSON'}));
+  if(req.url === '/api/auth/session' && req.method === 'GET'){
+    getSession(req).then(session=>{
+      if(!session){
+        sendJson(res, 401, {authenticated:false});
         return;
       }
+      sendJson(res, 200, {authenticated:true});
+    }).catch(()=>sendJson(res, 401, {authenticated:false}));
+    return;
+  }
 
-      if(!poem || typeof poem !== 'object' || Array.isArray(poem)){
-        res.writeHead(400, {'Content-Type':'application/json; charset=utf-8'});
-        res.end(JSON.stringify({error:'Ожидался объект стихотворения'}));
-        return;
-      }
+  if(req.url === '/api/auth/logout' && req.method === 'POST'){
+    if(!isSameOrigin(req)){
+      sendJson(res, 403, {error:'Запрос отклонён'});
+      return;
+    }
 
-      const title = typeof poem.title === 'string' ? poem.title.trim() : '';
-      const text = typeof poem.text === 'string' ? poem.text.trim() : '';
-      if(!title || !text){
-        res.writeHead(400, {'Content-Type':'application/json; charset=utf-8'});
-        res.end(JSON.stringify({error:'Название и текст обязательны'}));
+    setSessionCookie(res, '', 0);
+    sendJson(res, 200, {ok:true});
+    return;
+  }
+
+  if(req.url === '/api/poems' && req.method === 'GET'){
+    getSession(req).then(session=>{
+      if(!session){
+        sendJson(res, 401, {error:'Требуется вход'});
         return;
       }
 
       try{
         const poems = readPoems();
-        poems.push({title, text});
-        writePoems(poems);
-        res.writeHead(201, {'Content-Type':'application/json; charset=utf-8'});
-        res.end(JSON.stringify({poems}));
+        sendJson(res, 200, poems);
       }catch(error){
-        console.error('Failed to save poem:', error);
-        res.writeHead(500, {'Content-Type':'application/json; charset=utf-8'});
-        res.end(JSON.stringify({error:'Не удалось сохранить стихотворение'}));
+        console.error('Failed to read poems:', error.message);
+        sendJson(res, 500, {error:'Не удалось загрузить стихотворения'});
       }
-    }).catch(error=>{
-      if(!res.headersSent){
-        const status = error.message === 'Request body is too large' ? 413 : 400;
-        res.writeHead(status, {'Content-Type':'application/json; charset=utf-8'});
-        res.end(JSON.stringify({error:status === 413 ? 'Запрос слишком большой' : 'Не удалось прочитать запрос'}));
+    }).catch(()=>sendJson(res, 401, {error:'Требуется вход'}));
+    return;
+  }
+
+  if(req.url === '/api/poems' && req.method === 'POST'){
+    if(!isSameOrigin(req)){
+      sendJson(res, 403, {error:'Запрос отклонён'});
+      return;
+    }
+
+    getSession(req).then(session=>{
+      if(!session){
+        sendJson(res, 401, {error:'Требуется вход'});
+        return;
       }
-    });
+
+      readRequestBody(req).then(body=>{
+        let poem;
+        try{
+          poem = JSON.parse(body);
+        }catch{
+          sendJson(res, 400, {error:'Некорректный JSON'});
+          return;
+        }
+
+        if(!poem || typeof poem !== 'object' || Array.isArray(poem)){
+          sendJson(res, 400, {error:'Ожидался объект стихотворения'});
+          return;
+        }
+
+        const title = typeof poem.title === 'string' ? poem.title.trim() : '';
+        const text = typeof poem.text === 'string' ? poem.text.trim() : '';
+        if(!title || !text){
+          sendJson(res, 400, {error:'Название и текст обязательны'});
+          return;
+        }
+
+        try{
+          const poems = readPoems();
+          poems.push({title, text});
+          writePoems(poems);
+          sendJson(res, 201, {poems});
+        }catch(error){
+          console.error('Failed to save poem:', error.message);
+          sendJson(res, 500, {error:'Не удалось сохранить стихотворение'});
+        }
+      }).catch(error=>{
+        if(!res.headersSent){
+          const status = error.message === 'Request body is too large' ? 413 : 400;
+          sendJson(res, status, {error:status === 413 ? 'Запрос слишком большой' : 'Не удалось прочитать запрос'});
+        }
+      });
+    }).catch(()=>sendJson(res, 401, {error:'Требуется вход'}));
     return;
   }
 
