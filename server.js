@@ -11,6 +11,25 @@ const SESSION_TTL_SECONDS = 8 * 60 * 60;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
 const loginAttempts = new Map();
+let adminPasswordVerifier = null;
+
+async function initializeAdminPasswordVerifier(){
+  let password = process.env.ADMIN_PASSWORD || '';
+  delete process.env.ADMIN_PASSWORD;
+
+  if(!password || !process.env.ADMIN_USERNAME){
+    password = '';
+    return;
+  }
+
+  const salt = crypto.randomBytes(16);
+  try{
+    const key = await scrypt(password, salt, 64, {N:32768, r:8, p:1, maxmem:64 * 1024 * 1024});
+    adminPasswordVerifier = {salt, key};
+  }finally{
+    password = '';
+  }
+}
 
 function getSessionPassword(){
   return process.env.ADMIN_SESSION_SECRET || '';
@@ -87,17 +106,11 @@ function getLoginAttempt(ip){
 }
 
 async function verifyAdminPassword(password){
-  const encoded = process.env.ADMIN_PASSWORD || '';
-  const parts = encoded.split('$');
-  if(parts.length !== 6 || parts[0] !== 'scrypt' || parts[1] !== '32768' || parts[2] !== '8' || parts[3] !== '1') return false;
+  if(!adminPasswordVerifier) return false;
 
   try{
-    const salt = Buffer.from(parts[4], 'base64url');
-    const expected = Buffer.from(parts[5], 'base64url');
-    if(salt.length !== 16 || expected.length !== 64) return false;
-
-    const actual = await scrypt(password, salt, 64, {N:32768, r:8, p:1, maxmem:64 * 1024 * 1024});
-    return crypto.timingSafeEqual(actual, expected);
+    const actual = await scrypt(password, adminPasswordVerifier.salt, 64, {N:32768, r:8, p:1, maxmem:64 * 1024 * 1024});
+    return crypto.timingSafeEqual(actual, adminPasswordVerifier.key);
   }catch{
     return false;
   }
@@ -783,7 +796,7 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    if(!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD || getSessionPassword().length < 32){
+    if(!process.env.ADMIN_USERNAME || !adminPasswordVerifier || getSessionPassword().length < 32){
       sendJson(res, 503, {error:'Авторизация не настроена'});
       return;
     }
@@ -951,6 +964,11 @@ const server = http.createServer((req, res) => {
 
 const port = process.env.PORT || 3000;
 
-server.listen(port,'0.0.0.0',()=>{
-  console.log('Server started on port ' + port);
+initializeAdminPasswordVerifier().then(()=>{
+  server.listen(port,'0.0.0.0',()=>{
+    console.log('Server started on port ' + port);
+  });
+}).catch(()=>{
+  console.error('Failed to initialize password verifier');
+  process.exitCode = 1;
 });
