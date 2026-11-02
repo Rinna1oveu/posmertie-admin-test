@@ -523,8 +523,8 @@ async function savePoem(event){
   event.preventDefault();
 
   const form = event.currentTarget;
-  const title = form.elements.title.value.trim();
-  const text = form.elements.text.value.trim();
+  const title = document.getElementById('poem-title').value.trim();
+  const text = document.getElementById('poem-text').value.trim();
 
   if(!title || !text) return;
 
@@ -558,7 +558,16 @@ function renderPoems(){
   if(poems.length === 0){
     const empty = document.createElement('div');
     empty.className = 'item';
-    empty.textContent = 'No poems yet';
+
+    const title = document.createElement('div');
+    title.className = 'item-title';
+    title.textContent = 'Пока нет произведений';
+
+    const message = document.createElement('div');
+    message.className = 'item-meta';
+    message.textContent = 'Здесь появится список стихотворений.';
+
+    empty.append(title, message);
     list.append(empty);
     return;
   }
