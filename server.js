@@ -1,4 +1,6 @@
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 const {promisify} = require('util');
 const {sealData, unsealData} = require('iron-session');
@@ -295,8 +297,9 @@ input:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px #d7a7
 h1{margin:0;font:500 clamp(28px,3vw,38px) Georgia,"Times New Roman",serif;letter-spacing:-.02em}
 .subtitle{margin-top:7px;color:#a6a0a0}
 .eyebrow{margin-bottom:8px;color:var(--accent);font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase}
-.hero{position:relative;overflow:hidden;padding:34px 36px;border:1px solid #514148;border-radius:18px;background:linear-gradient(110deg,#30252b 0,#211e24 62%,#1d1b20 100%);margin-bottom:20px}
-.hero:after{content:"Р";position:absolute;right:39px;top:50%;transform:translateY(-55%);color:#d7a79d0b;font:240px Georgia,serif;line-height:1;pointer-events:none}
+.hero{display:flex;align-items:center;justify-content:space-between;gap:24px;overflow:hidden;padding:34px 36px;border:1px solid #514148;border-radius:18px;background:linear-gradient(110deg,#30252b 0,#211e24 62%,#1d1b20 100%);margin-bottom:20px}
+.hero-content{flex:1;min-width:0}
+.hero-mascot{display:block;flex:0 0 auto;width:auto;height:128px;max-width:25%;object-fit:contain;opacity:.72;filter:saturate(.72) brightness(.78);pointer-events:none;user-select:none}
 .hero h1{position:relative;z-index:1}
 .hero p{position:relative;z-index:1;max-width:600px;margin:12px 0 22px;color:#c1b6b8}
 .quick-actions{position:relative;z-index:1;display:flex;flex-wrap:wrap;gap:9px}
@@ -349,7 +352,8 @@ h1{margin:0;font:500 clamp(28px,3vw,38px) Georgia,"Times New Roman",serif;letter
 .settings-row:last-child{border-bottom:0}
 .settings-value{color:#89838b}
 @media(max-width:1000px){.content{padding:27px 28px}.sidebar{width:225px}.content{margin-left:225px}.dashboard-grid{grid-template-columns:1fr}.brand-name{font-size:15px}}
-@media(max-width:700px){.sidebar{position:sticky;inset:0 0 auto;width:100%;padding:12px 14px 10px;border-right:0;border-bottom:1px solid #302d34}.brand{padding:0 4px 12px}.brand-mark{width:34px;height:34px;flex-basis:34px;border-radius:11px;font-size:19px}.brand-caption{display:none}.nav{display:flex;gap:5px;overflow-x:auto;padding-bottom:2px}.nav-link{width:auto;flex:0 0 auto;padding:9px 10px;font-size:13px}.nav-icon{width:auto}.nav-link.logout{margin-left:auto}.sidebar-bottom{display:none}.content{margin-left:0;padding:22px 17px 40px}.topbar{margin-bottom:25px}.topbar-user span:last-child{display:none}.hero{padding:25px 22px}.hero:after{right:8px;font-size:170px}.stats{gap:9px}.stat-card{padding:15px 13px}.stat-top{align-items:flex-start;gap:5px;font-size:12px}.stat-number{font-size:29px}.stat-foot{font-size:11px}.section-top{align-items:flex-start;flex-direction:column}.add{width:auto}.poem-panel,.panel{padding:18px}.login-box{padding:29px 24px}}
+@media(max-width:700px){.sidebar{position:sticky;inset:0 0 auto;width:100%;padding:12px 14px 10px;border-right:0;border-bottom:1px solid #302d34}.brand{padding:0 4px 12px}.brand-mark{width:34px;height:34px;flex-basis:34px;border-radius:11px;font-size:19px}.brand-caption{display:none}.nav{display:flex;gap:5px;overflow-x:auto;padding-bottom:2px}.nav-link{width:auto;flex:0 0 auto;padding:9px 10px;font-size:13px}.nav-icon{width:auto}.nav-link.logout{margin-left:auto}.sidebar-bottom{display:none}.content{margin-left:0;padding:22px 17px 40px}.topbar{margin-bottom:25px}.topbar-user span:last-child{display:none}.hero{padding:25px 22px;gap:14px}.hero-mascot{height:100px;max-width:24%}.stats{gap:9px}.stat-card{padding:15px 13px}.stat-top{align-items:flex-start;gap:5px;font-size:12px}.stat-number{font-size:29px}.stat-foot{font-size:11px}.section-top{align-items:flex-start;flex-direction:column}.add{width:auto}.poem-panel,.panel{padding:18px}.login-box{padding:29px 24px}}
+@media(max-width:480px){.hero{display:block;padding:22px 19px}.hero-mascot{height:76px;max-width:100%;margin:14px 0 0 auto}}
 @media(max-width:420px){.nav-link{gap:7px;padding:8px;font-size:12px}.nav-icon{display:none}.stats{grid-template-columns:1fr}.stat-card{display:flex;align-items:center;justify-content:space-between}.stat-number{margin:0}.stat-foot{display:none}.quick-actions{display:grid;grid-template-columns:1fr}.btn-secondary{text-align:left}}
 </style>
 </head>
@@ -392,14 +396,17 @@ h1{margin:0;font:500 clamp(28px,3vw,38px) Georgia,"Times New Roman",serif;letter
     </div>
     <section class="section active" id="dashboard">
       <div class="hero">
-        <div class="eyebrow">Личный архив</div>
-        <h1>Добро пожаловать</h1>
-        <p>Здесь собраны тексты Посмертия Ринны. Продолжайте работу с архивом или начните новую запись.</p>
-        <div class="quick-actions">
-          <button class="btn-secondary" type="button" onclick="startPoem()"><span class="plus">＋</span>Новый стих</button>
-          <button class="btn-secondary" type="button" onclick="showSection('cycles')"><span class="plus">＋</span>Новый цикл</button>
-          <button class="btn-secondary" type="button" onclick="showSection('prose')"><span class="plus">＋</span>Новая проза</button>
+        <div class="hero-content">
+          <div class="eyebrow">Личный архив</div>
+          <h1>Добро пожаловать</h1>
+          <p>Здесь собраны тексты Посмертия Ринны. Продолжайте работу с архивом или начните новую запись.</p>
+          <div class="quick-actions">
+            <button class="btn-secondary" type="button" onclick="startPoem()"><span class="plus">＋</span>Новый стих</button>
+            <button class="btn-secondary" type="button" onclick="showSection('cycles')"><span class="plus">＋</span>Новый цикл</button>
+            <button class="btn-secondary" type="button" onclick="showSection('prose')"><span class="plus">＋</span>Новая проза</button>
+          </div>
         </div>
+        <img class="hero-mascot" src="/mascot.png" alt="" aria-hidden="true" width="128" height="128">
       </div>
       <div class="stats">
         <div class="stat-card"><div><div class="stat-top">Стихи <span class="stat-symbol">✎</span></div><div class="stat-number" id="poem-count">—</div><div class="stat-foot">в архиве</div></div></div>
@@ -824,6 +831,25 @@ const server = http.createServer((req, res) => {
       message:'Node.js работает'
     }));
 
+    return;
+  }
+
+  if(req.url === '/mascot.png' && req.method === 'GET'){
+    fs.readFile(path.join(__dirname, 'mascot.png'), (error, image)=>{
+      if(error){
+        res.writeHead(404, {'Content-Type':'text/plain; charset=utf-8'});
+        res.end('Not found');
+        return;
+      }
+
+      res.writeHead(200, {
+        'Content-Type':'image/png',
+        'Content-Length':image.length,
+        'Cache-Control':'public, max-age=86400',
+        'X-Content-Type-Options':'nosniff'
+      });
+      res.end(image);
+    });
     return;
   }
 
