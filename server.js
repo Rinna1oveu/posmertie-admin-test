@@ -1,6 +1,4 @@
 const http = require('http');
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 const {promisify} = require('util');
 const {sealData, unsealData} = require('iron-session');
@@ -12,6 +10,11 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
 const loginAttempts = new Map();
 let adminPasswordVerifier = null;
+const GITHUB_REPOSITORY = 'Rinna1oveu/posmertie-admin-test';
+const GITHUB_BRANCH = 'poems-data';
+const GITHUB_FILE_PATH = 'data/poems.json';
+const GITHUB_FILE_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${GITHUB_FILE_PATH}`;
+let poemWriteQueue = Promise.resolve();
 
 async function initializeAdminPasswordVerifier(){
   let password = process.env.ADMIN_PASSWORD || '';
@@ -121,24 +124,99 @@ function sendJson(res, status, value){
   res.end(JSON.stringify(value));
 }
 
-const dataDirectory = path.join(__dirname, 'data');
-const poemsFile = path.join(dataDirectory, 'poems.json');
+function githubApiError(status, code){
+  const error = new Error('GitHub API request failed');
+  error.status = status;
+  error.code = code;
+  return error;
+}
 
-function readPoems(){
+async function githubRequest(method, body){
+  const token = process.env.GITHUB_TOKEN;
+  if(!token) throw githubApiError(503, 'GITHUB_TOKEN_MISSING');
+
+  const headers = {
+    'Accept':'application/vnd.github+json',
+    'Authorization':`Bearer ${token}`,
+    'X-GitHub-Api-Version':'2022-11-28'
+  };
+  const options = {
+    method,
+    headers,
+    signal:AbortSignal.timeout(15000)
+  };
+
+  if(body){
+    headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(body);
+  }
+
+  return fetch(`${GITHUB_FILE_URL}?ref=${encodeURIComponent(GITHUB_BRANCH)}`, options);
+}
+
+async function readPoemsFromGitHub(){
+  const response = await githubRequest('GET');
+  if(response.status === 404) return {poems:[], sha:null};
+  if(!response.ok) throw githubApiError(response.status);
+
   try{
-    const poems = JSON.parse(fs.readFileSync(poemsFile, 'utf8'));
-    return Array.isArray(poems) ? poems : [];
-  }catch(error){
-    if(error.code === 'ENOENT') return [];
-    throw error;
+    const file = await response.json();
+    if(file.encoding !== 'base64' || typeof file.content !== 'string' || typeof file.sha !== 'string'){
+      throw new Error('Invalid file response');
+    }
+    const content = Buffer.from(file.content.replace(/\s/g, ''), 'base64').toString('utf8');
+    const poems = JSON.parse(content);
+    if(!Array.isArray(poems)) throw new Error('Invalid poems data');
+    return {poems, sha:file.sha};
+  }catch{
+    throw githubApiError(502, 'INVALID_GITHUB_FILE');
   }
 }
 
-function writePoems(poems){
-  fs.mkdirSync(dataDirectory, {recursive:true});
-  const temporaryFile = poemsFile + '.tmp';
-  fs.writeFileSync(temporaryFile, JSON.stringify(poems, null, 2) + '\n', 'utf8');
-  fs.renameSync(temporaryFile, poemsFile);
+async function writePoemsToGitHub(poems, sha){
+  const body = {
+    message:'Update poems from admin panel',
+    content:Buffer.from(JSON.stringify(poems, null, 2) + '\n', 'utf8').toString('base64'),
+    branch:GITHUB_BRANCH
+  };
+  if(sha) body.sha = sha;
+
+  const response = await githubRequest('PUT', body);
+  if(!response.ok) throw githubApiError(response.status);
+}
+
+async function appendPoemToGitHub(poem){
+  for(let attempt=0;attempt<3;attempt++){
+    const current = await readPoemsFromGitHub();
+    const poems = [...current.poems, poem];
+
+    try{
+      await writePoemsToGitHub(poems, current.sha);
+      return poems;
+    }catch(error){
+      if((error.status === 409 || error.status === 422) && attempt < 2) continue;
+      throw error;
+    }
+  }
+
+  throw githubApiError(409, 'GITHUB_WRITE_CONFLICT');
+}
+
+function queuePoemWrite(poem){
+  const operation = poemWriteQueue.then(()=>appendPoemToGitHub(poem));
+  poemWriteQueue = operation.then(()=>undefined, ()=>undefined);
+  return operation;
+}
+
+function sendGitHubError(res, error, action){
+  if(error.code === 'GITHUB_TOKEN_MISSING'){
+    sendJson(res, 503, {error:'Хранилище стихотворений не настроено'});
+    return;
+  }
+
+  if(error.status) console.error(`GitHub ${action} failed with status ${error.status}`);
+  else console.error(`GitHub ${action} failed`);
+  sendJson(res, 502, {error:action === 'read' ? 'Не удалось загрузить стихотворения' : 'Не удалось сохранить стихотворение'});
 }
 
 function readRequestBody(req){
@@ -870,13 +948,9 @@ const server = http.createServer((req, res) => {
         return;
       }
 
-      try{
-        const poems = readPoems();
+      readPoemsFromGitHub().then(({poems})=>{
         sendJson(res, 200, poems);
-      }catch(error){
-        console.error('Failed to read poems:', error.message);
-        sendJson(res, 500, {error:'Не удалось загрузить стихотворения'});
-      }
+      }).catch(error=>sendGitHubError(res, error, 'read'));
     }).catch(()=>sendJson(res, 401, {error:'Требуется вход'}));
     return;
   }
@@ -914,15 +988,9 @@ const server = http.createServer((req, res) => {
           return;
         }
 
-        try{
-          const poems = readPoems();
-          poems.push({title, text});
-          writePoems(poems);
+        queuePoemWrite({title, text}).then(poems=>{
           sendJson(res, 201, {poems});
-        }catch(error){
-          console.error('Failed to save poem:', error.message);
-          sendJson(res, 500, {error:'Не удалось сохранить стихотворение'});
-        }
+        }).catch(error=>sendGitHubError(res, error, 'write'));
       }).catch(error=>{
         if(!res.headersSent){
           const status = error.message === 'Request body is too large' ? 413 : 400;
