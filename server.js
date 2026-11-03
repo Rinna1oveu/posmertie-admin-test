@@ -18,8 +18,11 @@ const GITHUB_FILE_PATH = 'data/poems.json';
 const GITHUB_FILE_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${GITHUB_FILE_PATH}`;
 const GITHUB_CYCLES_FILE_PATH = 'data/cycles.json';
 const GITHUB_CYCLES_FILE_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${GITHUB_CYCLES_FILE_PATH}`;
+const GITHUB_PROSE_FILE_PATH = 'data/prose.json';
+const GITHUB_PROSE_FILE_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${GITHUB_PROSE_FILE_PATH}`;
 let poemWriteQueue = Promise.resolve();
 let cycleWriteQueue = Promise.resolve();
+let proseWriteQueue = Promise.resolve();
 
 async function initializeAdminPasswordVerifier(){
   let password = process.env.ADMIN_PASSWORD || '';
@@ -325,6 +328,115 @@ function queueCycleMutation(mutate, message){
   const operation = cycleWriteQueue.then(()=>mutateCyclesOnGitHub(mutate, message));
   cycleWriteQueue = operation.then(()=>undefined, ()=>undefined);
   return operation;
+}
+
+function getProseId(entry,index){
+  if(typeof entry.id === 'string' && entry.id) return entry.id;
+  const legacyData = {...entry};
+  delete legacyData.id;
+  const signature = `${index}\0${JSON.stringify(legacyData)}`;
+  return `legacy-prose-${crypto.createHash('sha256').update(signature).digest('hex').slice(0, 24)}`;
+}
+
+async function readProseFromGitHub(){
+  const response = await githubRequest('GET', undefined, GITHUB_PROSE_FILE_URL);
+  if(response.status === 404) return {prose:[], sha:null};
+  if(!response.ok) throw githubApiError(response.status);
+
+  try{
+    const file = await response.json();
+    if(file.encoding !== 'base64' || typeof file.content !== 'string' || typeof file.sha !== 'string'){
+      throw new Error('Invalid file response');
+    }
+    const content = Buffer.from(file.content.replace(/\s/g, ''), 'base64').toString('utf8');
+    const prose = JSON.parse(content);
+    if(!Array.isArray(prose) || prose.some(entry=>!entry || typeof entry !== 'object' || Array.isArray(entry))){
+      throw new Error('Invalid prose data');
+    }
+    const proseWithIds = prose.map((entry,index)=>({...entry,id:getProseId(entry,index)}));
+    return {prose:proseWithIds, sha:file.sha};
+  }catch{
+    throw githubApiError(502, 'INVALID_GITHUB_PROSE_FILE');
+  }
+}
+
+async function writeProseToGitHub(prose, sha, message='Update prose from admin panel'){
+  const body = {
+    message,
+    content:Buffer.from(JSON.stringify(prose, null, 2) + '\n', 'utf8').toString('base64'),
+    branch:GITHUB_BRANCH
+  };
+  if(sha) body.sha = sha;
+
+  const response = await githubRequest('PUT', body, GITHUB_PROSE_FILE_URL);
+  if(!response.ok) throw githubApiError(response.status);
+}
+
+async function mutateProseOnGitHub(mutate, message){
+  for(let attempt=0;attempt<3;attempt++){
+    const current = await readProseFromGitHub();
+    const prose = mutate(current.prose);
+
+    try{
+      await writeProseToGitHub(prose, current.sha, message);
+      return prose;
+    }catch(error){
+      if((error.status === 409 || error.status === 422) && attempt < 2) continue;
+      throw error;
+    }
+  }
+
+  throw githubApiError(409, 'GITHUB_PROSE_WRITE_CONFLICT');
+}
+
+function queueProseMutation(mutate, message){
+  const operation = proseWriteQueue.then(()=>mutateProseOnGitHub(mutate, message));
+  proseWriteQueue = operation.then(()=>undefined, ()=>undefined);
+  return operation;
+}
+
+function validateProse(input){
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  const type = input.type;
+  const description = typeof input.description === 'string' ? input.description.trim() : '';
+  const text = typeof input.text === 'string' ? input.text.trim() : '';
+  const status = input.status === undefined ? 'published' : input.status;
+  const date = typeof input.date === 'string' ? input.date.trim() : '';
+  const image = typeof input.image === 'string' ? input.image.trim() : '';
+  const imageCaption = typeof input.imageCaption === 'string' ? input.imageCaption.trim() : '';
+
+  if(!title) return {error:'Название произведения обязательно'};
+  if(title.length > 300 || description.length > 10000 || text.length > 1000000) return {error:'Название, описание или текст слишком длинные'};
+  if(!['story','novel','chapter'].includes(type)) return {error:'Неизвестный тип произведения'};
+  if(status !== 'published' && status !== 'draft') return {error:'Неизвестный статус произведения'};
+  if(date){
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return {error:'Укажите корректную дату'};
+    const parsedDate = new Date(date + 'T00:00:00.000Z');
+    if(Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0,10) !== date) return {error:'Укажите корректную дату'};
+  }
+  const hasUnsupportedScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(image) && !image.startsWith('http://') && !image.startsWith('https://');
+  if(image.length > 2048 || imageCaption.length > 500) return {error:'Ссылка или подпись к иллюстрации слишком длинная'};
+  if(image && (hasUnsupportedScheme || !(image.startsWith('http://') || image.startsWith('https://') || image.startsWith('/') || /^[a-zA-Z0-9._-]/.test(image)))) return {error:'Укажите ссылку или путь к изображению'};
+
+  return {prose:{title,type,description,text,status,date,image,imageCaption}};
+}
+
+function sendProseGitHubError(res,error,action){
+  if(error.code === 'PROSE_NOT_FOUND'){
+    sendJson(res,404,{error:'Произведение не найдено'});
+    return;
+  }
+  if(error.code === 'GITHUB_TOKEN_MISSING'){
+    sendJson(res,503,{error:'Хранилище произведений не настроено'});
+    return;
+  }
+  if(error.status) console.error(`GitHub prose ${action} failed with status ${error.status}`);
+  else console.error(`GitHub prose ${action} failed`);
+  sendJson(res,502,{error:action === 'read' ? 'Не удалось загрузить произведения' : 'Не удалось сохранить произведение'});
+}
+
+function sendProseMutationError(res,error){
+  sendProseGitHubError(res,error,'write');
 }
 
 async function removePoemReferencesFromCycles(poemId){
@@ -781,6 +893,16 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .poem-cycle-filter button{padding:7px 11px;border:1px solid #54202c;border-radius:2px;background:#10080b;color:#ae969c;font-size:11px;transition:background .15s,border-color .15s,color .15s}
 .poem-cycle-filter button:hover,.poem-cycle-filter button.active{border-color:#a62a45;background:#310e18;color:#fff}
 .poem-filter-count{color:#8d747b;font-size:10px;letter-spacing:.12em;text-transform:uppercase}
+.prose-filter-bar{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:8px;padding-bottom:15px;border-bottom:1px solid #401722}
+.prose-search-label{margin:0 0 0 auto;color:#8d747b;font-size:10px;letter-spacing:.12em;text-transform:uppercase}
+.prose-search{width:min(100%,240px);padding:8px 10px;font-size:12px}
+.prose-list{display:grid}
+.prose-card{padding:18px 0;border-bottom:1px solid #401722}
+.prose-card:last-child{border-bottom:0}
+.prose-card-type{margin:0 0 4px;color:#c54a62;font-size:9px;font-weight:700;letter-spacing:.16em;text-transform:uppercase}
+.prose-card .poem-item-date{margin-top:5px}
+.prose-empty{padding:22px 0;color:#a08a91;font:italic 15px Georgia,"Times New Roman",serif}
+.prose-preview-description{margin:-12px 0 24px;color:#c9b5bb;font:italic 16px/1.7 Georgia,"Times New Roman",serif;white-space:pre-wrap}
 .poem-cycle-info{margin-top:8px;color:#97757d;font-size:11px;letter-spacing:.06em}
 .poem-cycle-info.has-cycles{color:#d44c65}
 .poem-cycle-editor{margin-top:18px;padding:14px 15px;border:1px solid #421722;background:#11080c}
@@ -888,6 +1010,9 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
   .hero{display:block;padding:22px 19px}
   .hero-mascot{height:76px;max-width:100%;margin:14px 0 0 auto}
   .poem-filter-bar{align-items:flex-start;flex-direction:column}
+  .prose-filter-bar{align-items:stretch;flex-direction:column}
+  .prose-search-label{margin:0}
+  .prose-search{width:100%}
   .preview-overlay{padding:10px}
   .preview-body{font-size:16px}
   .cycle-card{grid-template-columns:72px minmax(0,1fr);gap:12px}
@@ -952,7 +1077,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
           <div class="quick-actions">
             <button class="btn-secondary" type="button" onclick="startPoem()"><span class="plus">＋</span>Новый стих</button>
           <button class="btn-secondary" type="button" onclick="startCycle()"><span class="plus">＋</span>Новый цикл</button>
-            <button class="btn-secondary" type="button" onclick="showSection('prose')"><span class="plus">＋</span>Новая проза</button>
+            <button class="btn-secondary" type="button" onclick="startProse()"><span class="plus">＋</span>Новая проза</button>
           </div>
         </div>
         <img class="hero-mascot" src="/mascot.png" alt="" aria-hidden="true" width="128" height="128">
@@ -960,7 +1085,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
       <div class="stats">
         <div class="stat-card"><div><div class="stat-top">Стихи <span class="stat-symbol">✎</span></div><div class="stat-number" id="poem-count">—</div><div class="stat-foot">в архиве</div></div></div>
         <div class="stat-card"><div><div class="stat-top">Циклы <span class="stat-symbol">◌</span></div><div class="stat-number" id="cycle-count">0</div><div class="stat-foot">раздел в разработке</div></div></div>
-        <div class="stat-card"><div><div class="stat-top">Проза <span class="stat-symbol">▤</span></div><div class="stat-number" id="prose-count">0</div><div class="stat-foot">раздел в разработке</div></div></div>
+        <div class="stat-card"><div><div class="stat-top">Проза <span class="stat-symbol">▤</span></div><div class="stat-number" id="prose-count">—</div><div class="stat-foot">в архиве</div></div></div>
       </div>
       <div class="dashboard-grid">
         <div class="panel">
@@ -1121,8 +1246,90 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
     </section>
     
     <section class="section" id="prose">
-      <div class="page-heading"><div class="eyebrow">Другие тексты</div><h1>Проза</h1><div class="subtitle">Рассказы и произведения в прозе</div></div>
-      <div class="panel placeholder-panel"><div class="placeholder-glyph" aria-hidden="true">▤</div><h2>Раздел прозы готовится</h2><p>Здесь будет собрана проза Посмертия Ринны. Сейчас раздел доступен как часть навигации архива.</p></div>
+      <div class="section-top">
+        <div class="page-heading"><div class="eyebrow">Другие тексты</div><h1>Проза</h1><div class="subtitle">Рассказы и произведения в прозе</div></div>
+        <button class="btn add" type="button" onclick="openProseForm()">＋ Новая проза</button>
+      </div>
+      <div class="panel poem-panel prose-panel">
+        <form id="prose-form" onsubmit="saveProse(event)" style="display:none">
+          <input id="prose-id" type="hidden">
+          <div class="panel-heading"><h2 id="prose-form-heading">Новая проза</h2></div>
+          <div class="editor-fields">
+            <div class="editor-field editor-field-wide">
+              <label for="prose-title">Название</label>
+              <input id="prose-title" name="title" required maxlength="300" placeholder="Название произведения">
+            </div>
+            <div class="editor-field">
+              <label for="prose-type">Тип</label>
+              <select id="prose-type" name="type" required>
+                <option value="story">Рассказ</option>
+                <option value="novel">Роман</option>
+                <option value="chapter">Глава</option>
+              </select>
+            </div>
+            <div class="editor-field">
+              <label for="prose-date">Дата</label>
+              <input id="prose-date" name="date" type="date">
+            </div>
+            <div class="editor-field editor-field-wide">
+              <label for="prose-description">Краткое описание</label>
+              <textarea id="prose-description" name="description" rows="3" maxlength="10000" placeholder="О чём это произведение"></textarea>
+            </div>
+            <div class="editor-field editor-field-wide">
+              <label for="prose-text">Полный текст</label>
+              <textarea id="prose-text" name="text" rows="12" placeholder="Начните писать…"></textarea>
+            </div>
+            <div class="editor-field">
+              <label for="prose-status">Статус</label>
+              <select id="prose-status" name="status">
+                <option value="published">Опубликовано</option>
+                <option value="draft">Черновик</option>
+              </select>
+            </div>
+            <div class="editor-field editor-field-wide">
+              <label for="prose-image">Иллюстрация — ссылка или путь</label>
+              <input id="prose-image" name="image" type="text" inputmode="url" maxlength="2048" placeholder="/images/story.jpg или https://…">
+            </div>
+            <div class="editor-field editor-field-wide">
+              <label for="prose-image-caption">Подпись к иллюстрации <span class="optional">необязательно</span></label>
+              <input id="prose-image-caption" name="imageCaption" type="text" maxlength="500" placeholder="Подпись">
+            </div>
+          </div>
+          <div class="editor-actions">
+            <button class="btn" type="submit">Сохранить</button>
+            <button class="btn-secondary" type="submit" data-save-status="draft">Сохранить как черновик</button>
+            <button class="btn-secondary" type="button" onclick="previewProseForm()">Предпросмотр</button>
+            <button class="btn-secondary" type="button" onclick="closeProseForm()">Отмена</button>
+            <button class="btn-danger" id="prose-delete" type="button" onclick="deleteEditingProse()" hidden>Удалить</button>
+          </div>
+        </form>
+        <div class="error" id="prose-error" role="alert"></div>
+        <div class="prose-filter-bar">
+          <div class="poem-cycle-filter" role="group" aria-label="Фильтр прозы по статусу">
+            <button class="active" type="button" data-prose-filter="all" onclick="setProseFilter('all')">Все</button>
+            <button type="button" data-prose-filter="published" onclick="setProseFilter('published')">Опубликованные</button>
+            <button type="button" data-prose-filter="draft" onclick="setProseFilter('draft')">Черновики</button>
+          </div>
+          <label class="prose-search-label" for="prose-search">Поиск по названию</label>
+          <input class="prose-search" id="prose-search" type="search" placeholder="Название произведения" oninput="setProseSearch(this.value)">
+          <span class="poem-filter-count" id="prose-filter-count"></span>
+        </div>
+        <div class="prose-list" id="prose-list"></div>
+      </div>
+      <div class="preview-overlay" id="prose-preview" hidden onclick="if(event.target===this)closeProsePreview()">
+        <article class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="prose-preview-title">
+          <div class="preview-toolbar"><span>PREVIEW / PROSE</span><button class="btn-secondary" type="button" onclick="closeProsePreview()">Закрыть <span aria-hidden="true">×</span></button></div>
+          <div class="preview-poem prose-preview-content">
+            <div class="preview-index">ПОСМЕРТИЕ РИННЫ · АРХИВ</div>
+            <div class="preview-date" id="prose-preview-meta"></div>
+            <h2 id="prose-preview-title"></h2>
+            <p class="prose-preview-description" id="prose-preview-description" hidden></p>
+            <div class="preview-body" id="prose-preview-body"></div>
+            <figure class="preview-figure" id="prose-preview-figure" hidden><img id="prose-preview-image" alt=""><figcaption id="prose-preview-caption"></figcaption></figure>
+            <div class="preview-status" id="prose-preview-status"></div>
+          </div>
+        </article>
+      </div>
     </section>
     <section class="section" id="settings">
       <div class="page-heading"><div class="eyebrow">Архив</div><h1>Настройки</h1><div class="subtitle">Состояние и сведения о панели</div></div>
@@ -1141,6 +1348,12 @@ let cyclesLoadError = '';
 let cyclesLoadPromise = null;
 let editingCycleId = '';
 let editingCyclePoemIds = [];
+let proseEntries = [];
+let proseLoaded = false;
+let proseLoadPromise = null;
+let proseStatusFilter = 'all';
+let proseSearchTerm = '';
+let editingProseId = '';
 
 async function loadPoems(){
   setStorageStatus('checking');
@@ -1269,6 +1482,298 @@ function editPoem(poem){
   document.getElementById('poem-form').style.display = 'block';
   document.getElementById('poem-title').focus();
 }
+function showProseError(message){
+  const error = document.getElementById('prose-error');
+  if(!error) return;
+  error.textContent = message;
+  error.style.display = 'block';
+}
+function clearProseError(){
+  const error = document.getElementById('prose-error');
+  if(!error) return;
+  error.textContent = '';
+  error.style.display = 'none';
+}
+async function loadProse(){
+  if(proseLoadPromise) return proseLoadPromise;
+  proseLoadPromise = (async()=>{
+    proseLoaded = false;
+    renderProse();
+    clearProseError();
+    try{
+      const response = await fetch('/api/prose');
+      const result = await response.json();
+      if(!response.ok) throw new Error(result.error || 'Не удалось загрузить прозу');
+      if(!result || !Array.isArray(result.prose)) throw new Error('Сервер вернул некорректный список прозы');
+      proseEntries = result.prose;
+      proseLoaded = true;
+      document.getElementById('prose-count').textContent = String(proseEntries.length);
+      setStorageStatus('online');
+      renderProse();
+    }catch(error){
+      proseLoaded = false;
+      setStorageStatus('offline');
+      showProseError(error.message);
+      renderProse();
+    }
+  })().finally(()=>{proseLoadPromise = null;});
+  return proseLoadPromise;
+}
+function proseTypeLabel(type){
+  return ({story:'Рассказ',novel:'Роман',chapter:'Глава'})[type] || 'Произведение';
+}
+function proseStatusLabel(entry){
+  return entry.status === 'draft' ? 'Черновик' : 'Опубликовано';
+}
+function setProseFilter(filter){
+  if(!['all','published','draft'].includes(filter)) return;
+  proseStatusFilter = filter;
+  renderProse();
+}
+function setProseSearch(value){
+  proseSearchTerm = value.trim().toLocaleLowerCase('ru');
+  renderProse();
+}
+function renderProse(){
+  const list = document.getElementById('prose-list');
+  if(!list) return;
+  list.replaceChildren();
+  document.querySelectorAll('[data-prose-filter]').forEach(button=>{
+    button.classList.toggle('active',button.dataset.proseFilter === proseStatusFilter);
+  });
+  const count = document.getElementById('prose-filter-count');
+  if(!proseLoaded){
+    if(count) count.textContent = '';
+    const loading = document.createElement('div');
+    loading.className = 'prose-empty';
+    loading.textContent = 'Загружаем прозу…';
+    list.append(loading);
+    return;
+  }
+  if(proseEntries.length === 0){
+    if(count) count.textContent = '0 / 0';
+    const empty = document.createElement('div');
+    empty.className = 'prose-empty';
+    empty.textContent = 'Проза пока пуста';
+    list.append(empty);
+    return;
+  }
+  const visibleEntries = proseEntries.filter(entry=>{
+    const matchesStatus = proseStatusFilter === 'all' || entry.status === proseStatusFilter;
+    const matchesSearch = !proseSearchTerm || (entry.title || '').toLocaleLowerCase('ru').includes(proseSearchTerm);
+    return matchesStatus && matchesSearch;
+  });
+  if(count) count.textContent = visibleEntries.length + ' / ' + proseEntries.length;
+  if(!visibleEntries.length){
+    const empty = document.createElement('div');
+    empty.className = 'prose-empty';
+    empty.textContent = 'Ничего не найдено. Измените фильтр или поисковый запрос.';
+    list.append(empty);
+    return;
+  }
+  visibleEntries.forEach(entry=>{
+    const card = document.createElement('article');
+    card.className = 'prose-card';
+    const head = document.createElement('div');
+    head.className = 'poem-item-head';
+    const titleBlock = document.createElement('div');
+    const type = document.createElement('div');
+    type.className = 'prose-card-type';
+    type.textContent = proseTypeLabel(entry.type);
+    const title = document.createElement('div');
+    title.className = 'item-title';
+    title.textContent = entry.title || 'Без названия';
+    const date = document.createElement('div');
+    date.className = 'poem-item-date';
+    date.textContent = formatPoemDate(entry.date);
+    titleBlock.append(type,title,date);
+    const status = document.createElement('span');
+    status.className = 'poem-status' + (entry.status === 'draft' ? ' draft' : '');
+    status.textContent = proseStatusLabel(entry);
+    head.append(titleBlock,status);
+    const snippet = document.createElement('div');
+    snippet.className = 'poem-snippet';
+    const summary = (entry.description || entry.text || '').trim();
+    snippet.textContent = summary.length > 220 ? summary.slice(0,220) + '…' : summary;
+    const actions = document.createElement('div');
+    actions.className = 'poem-item-actions';
+    const preview = document.createElement('button');
+    preview.className = 'btn-secondary';
+    preview.type = 'button';
+    preview.textContent = 'Предпросмотр';
+    preview.addEventListener('click',()=>openProsePreview(entry));
+    const edit = document.createElement('button');
+    edit.className = 'btn-secondary';
+    edit.type = 'button';
+    edit.textContent = 'Изменить';
+    edit.addEventListener('click',()=>editProse(entry));
+    const remove = document.createElement('button');
+    remove.className = 'btn-danger';
+    remove.type = 'button';
+    remove.textContent = 'Удалить';
+    remove.addEventListener('click',()=>deleteProse(entry.id,entry.title));
+    actions.append(preview,edit,remove);
+    card.append(head,snippet,actions);
+    list.append(card);
+  });
+}
+function openProseForm(){
+  const form = document.getElementById('prose-form');
+  form.reset();
+  editingProseId = '';
+  document.getElementById('prose-id').value = '';
+  document.getElementById('prose-form-heading').textContent = 'Новая проза';
+  const now = new Date();
+  document.getElementById('prose-date').value = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0,10);
+  document.getElementById('prose-type').value = 'story';
+  document.getElementById('prose-status').value = 'published';
+  document.getElementById('prose-delete').hidden = true;
+  clearProseError();
+  form.style.display = 'block';
+  document.getElementById('prose-title').focus();
+}
+function startProse(){
+  showSection('prose');
+  openProseForm();
+}
+function closeProseForm(){
+  const form = document.getElementById('prose-form');
+  form.reset();
+  form.style.display = 'none';
+  editingProseId = '';
+  document.getElementById('prose-id').value = '';
+  document.getElementById('prose-delete').hidden = true;
+  clearProseError();
+}
+function editProse(entry){
+  showSection('prose');
+  editingProseId = entry.id;
+  document.getElementById('prose-id').value = entry.id;
+  document.getElementById('prose-form-heading').textContent = 'Редактировать произведение';
+  document.getElementById('prose-title').value = entry.title || '';
+  document.getElementById('prose-type').value = ['story','novel','chapter'].includes(entry.type) ? entry.type : 'story';
+  document.getElementById('prose-description').value = entry.description || '';
+  document.getElementById('prose-text').value = entry.text || '';
+  document.getElementById('prose-date').value = entry.date || '';
+  document.getElementById('prose-status').value = entry.status === 'draft' ? 'draft' : 'published';
+  document.getElementById('prose-image').value = entry.image || '';
+  document.getElementById('prose-image-caption').value = entry.imageCaption || '';
+  document.getElementById('prose-delete').hidden = false;
+  clearProseError();
+  document.getElementById('prose-form').style.display = 'block';
+  document.getElementById('prose-title').focus();
+}
+function fillProsePreview(entry){
+  document.getElementById('prose-preview-title').textContent = entry.title || 'Без названия';
+  document.getElementById('prose-preview-meta').textContent = proseTypeLabel(entry.type) + ' · ' + formatPoemDate(entry.date);
+  document.getElementById('prose-preview-description').textContent = entry.description || '';
+  document.getElementById('prose-preview-description').hidden = !entry.description;
+  document.getElementById('prose-preview-body').textContent = entry.text || '';
+  document.getElementById('prose-preview-status').textContent = proseStatusLabel(entry);
+  const figure = document.getElementById('prose-preview-figure');
+  const image = document.getElementById('prose-preview-image');
+  const caption = document.getElementById('prose-preview-caption');
+  const source = safeImageSource(entry.image);
+  image.onerror = ()=>{figure.hidden = true;};
+  image.onload = ()=>{figure.hidden = false;};
+  if(source){
+    image.src = source;
+    caption.textContent = entry.imageCaption || '';
+    caption.hidden = !entry.imageCaption;
+    figure.hidden = false;
+  }else{
+    image.removeAttribute('src');
+    figure.hidden = true;
+  }
+  document.getElementById('prose-preview').hidden = false;
+}
+function previewProseForm(){
+  fillProsePreview({
+    title:document.getElementById('prose-title').value.trim(),
+    type:document.getElementById('prose-type').value,
+    description:document.getElementById('prose-description').value.trim(),
+    text:document.getElementById('prose-text').value,
+    date:document.getElementById('prose-date').value,
+    status:document.getElementById('prose-status').value,
+    image:document.getElementById('prose-image').value.trim(),
+    imageCaption:document.getElementById('prose-image-caption').value.trim()
+  });
+}
+function openProsePreview(entry){
+  fillProsePreview(entry);
+}
+function closeProsePreview(){
+  document.getElementById('prose-preview').hidden = true;
+}
+async function saveProse(event){
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submitButton = form.querySelector('[type="submit"]:focus') || event.submitter;
+  const forcedStatus = submitButton && submitButton.dataset.saveStatus;
+  const entry = {
+    title:document.getElementById('prose-title').value.trim(),
+    type:document.getElementById('prose-type').value,
+    description:document.getElementById('prose-description').value.trim(),
+    text:document.getElementById('prose-text').value.trim(),
+    date:document.getElementById('prose-date').value,
+    status:forcedStatus || document.getElementById('prose-status').value,
+    image:document.getElementById('prose-image').value.trim(),
+    imageCaption:document.getElementById('prose-image-caption').value.trim()
+  };
+  const payload = editingProseId ? {action:'update',id:editingProseId,prose:entry} : {action:'create',prose:entry};
+  const buttons = form.querySelectorAll('[type="submit"]');
+  buttons.forEach(button=>button.disabled = true);
+  try{
+    const response = await fetch('/api/prose',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    const result = await response.json();
+    if(!response.ok) throw new Error(result.error || 'Не удалось сохранить произведение');
+    if(!result || !Array.isArray(result.prose)) throw new Error('Сервер вернул некорректный список прозы');
+    proseEntries = result.prose;
+    proseLoaded = true;
+    document.getElementById('prose-count').textContent = String(proseEntries.length);
+    setStorageStatus('online');
+    renderProse();
+    closeProseForm();
+  }catch(error){
+    setStorageStatus('offline');
+    showProseError(error.message);
+  }finally{
+    buttons.forEach(button=>button.disabled = false);
+  }
+}
+async function deleteProse(id,title){
+  if(!window.confirm('Удалить произведение «' + (title || 'Без названия') + '»? Это действие нельзя отменить.')) return;
+  try{
+    const response = await fetch('/api/prose',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'delete',id})
+    });
+    const result = await response.json();
+    if(!response.ok) throw new Error(result.error || 'Не удалось удалить произведение');
+    if(!result || !Array.isArray(result.prose)) throw new Error('Сервер вернул некорректный список прозы');
+    proseEntries = result.prose;
+    proseLoaded = true;
+    document.getElementById('prose-count').textContent = String(proseEntries.length);
+    setStorageStatus('online');
+    renderProse();
+    if(editingProseId === id) closeProseForm();
+    closeProsePreview();
+    clearProseError();
+  }catch(error){
+    showProseError(error.message);
+  }
+}
+function deleteEditingProse(){
+  if(!editingProseId) return;
+  const entry = proseEntries.find(item=>item.id === editingProseId);
+  deleteProse(editingProseId,entry && entry.title);
+}
+
 function formatPoemDate(date){
   if(!date) return 'Дата не указана';
   const parts = date.split('-');
@@ -1985,6 +2490,7 @@ function show(id,button){
   if(activeButton) activeButton.classList.add('active');
   document.getElementById('view-title').textContent = viewNames[id] || 'Архив';
   if(id === 'cycles' || id === 'poems') loadCycles();
+  if(id === 'prose') loadProse();
 }
 
 restoreSession();
@@ -2302,6 +2808,120 @@ const server = http.createServer((req, res) => {
         }
       });
     }).catch(()=>sendJson(res, 401, {error:'Требуется вход'}));
+    return;
+  }
+
+  if(req.url === '/api/prose' && req.method === 'GET'){
+    getSession(req).then(session=>{
+      if(!session){
+        sendJson(res,401,{error:'Требуется вход'});
+        return;
+      }
+
+      readProseFromGitHub().then(({prose})=>{
+        sendJson(res,200,{prose});
+      }).catch(error=>sendProseGitHubError(res,error,'read'));
+    }).catch(()=>sendJson(res,401,{error:'Требуется вход'}));
+    return;
+  }
+
+  if(req.url === '/api/prose' && req.method === 'POST'){
+    if(!isSameOrigin(req)){
+      sendJson(res,403,{error:'Запрос отклонён'});
+      return;
+    }
+
+    getSession(req).then(session=>{
+      if(!session){
+        sendJson(res,401,{error:'Требуется вход'});
+        return;
+      }
+
+      readRequestBody(req).then(body=>{
+        let payload;
+        try{
+          payload = JSON.parse(body);
+        }catch{
+          sendJson(res,400,{error:'Некорректный JSON'});
+          return;
+        }
+
+        if(!payload || typeof payload !== 'object' || Array.isArray(payload)){
+          sendJson(res,400,{error:'Ожидался объект произведения'});
+          return;
+        }
+
+        const action = payload.action || 'create';
+        if(action === 'create'){
+          const input = payload.prose && typeof payload.prose === 'object' && !Array.isArray(payload.prose) ? payload.prose : payload;
+          const validation = validateProse(input);
+          if(validation.error){
+            sendJson(res,400,{error:validation.error});
+            return;
+          }
+          const newEntry = {...validation.prose,id:crypto.randomUUID()};
+          queueProseMutation(prose=>[...prose,newEntry],'Create prose from admin panel').then(prose=>{
+            sendJson(res,201,{prose});
+          }).catch(error=>sendProseMutationError(res,error));
+          return;
+        }
+
+        if(action === 'update'){
+          const id = typeof payload.id === 'string' ? payload.id : '';
+          const input = payload.prose;
+          if(!id || !input || typeof input !== 'object' || Array.isArray(input)){
+            sendJson(res,400,{error:'Не указано произведение для изменения'});
+            return;
+          }
+          const validation = validateProse(input);
+          if(validation.error){
+            sendJson(res,400,{error:validation.error});
+            return;
+          }
+          queueProseMutation(prose=>{
+            const index = prose.findIndex((entry,position)=>getProseId(entry,position) === id);
+            if(index < 0){
+              const error = new Error('Prose entry not found');
+              error.code = 'PROSE_NOT_FOUND';
+              throw error;
+            }
+            const updated = prose.slice();
+            updated[index] = {...updated[index],...validation.prose,id:getProseId(updated[index],index)};
+            return updated;
+          },'Edit prose from admin panel').then(prose=>{
+            sendJson(res,200,{prose});
+          }).catch(error=>sendProseMutationError(res,error));
+          return;
+        }
+
+        if(action === 'delete'){
+          const id = typeof payload.id === 'string' ? payload.id : '';
+          if(!id){
+            sendJson(res,400,{error:'Не указано произведение для удаления'});
+            return;
+          }
+          queueProseMutation(prose=>{
+            const index = prose.findIndex((entry,position)=>getProseId(entry,position) === id);
+            if(index < 0){
+              const error = new Error('Prose entry not found');
+              error.code = 'PROSE_NOT_FOUND';
+              throw error;
+            }
+            return prose.filter((_,position)=>position !== index);
+          },'Delete prose from admin panel').then(prose=>{
+            sendJson(res,200,{prose});
+          }).catch(error=>sendProseMutationError(res,error));
+          return;
+        }
+
+        sendJson(res,400,{error:'Неизвестное действие с произведением'});
+      }).catch(error=>{
+        if(!res.headersSent){
+          const status = error.message === 'Request body is too large' ? 413 : 400;
+          sendJson(res,status,{error:status === 413 ? 'Запрос слишком большой' : 'Не удалось прочитать запрос'});
+        }
+      });
+    }).catch(()=>sendJson(res,401,{error:'Требуется вход'}));
     return;
   }
 
