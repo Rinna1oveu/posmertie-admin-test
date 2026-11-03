@@ -556,6 +556,7 @@ function queuePoemMutation(mutate, message){
 const DEFAULT_IMAGE_SETTINGS = Object.freeze({imageEffect:'none',imagePosition:'center',imageScale:100,imageIntensity:50,imageOverlay:0,imageHover:'none'});
 const DEFAULT_IMAGE_WATERMARK_SETTINGS = Object.freeze({imageWatermark:true,imageWatermarkOpacity:42,imageWatermarkPosition:'bottom-right'});
 const DEFAULT_IMAGE_ARCHIVE_SETTINGS = Object.freeze({imageArchiveMarkup:true,visualRecordLabel:'',imageMetaPrefix:'ИЛЛЮСТРАЦИЯ',imageMetaSection:'',imageMetaTitle:'',imageCornerLabel:''});
+const IMAGE_PRESENTATION_FIELDS = ['imageCaption','imageEffect','imagePosition','imageScale','imageIntensity','imageOverlay','imageHover','imageWatermark','imageWatermarkOpacity','imageWatermarkPosition','imageArchiveMarkup','visualRecordLabel','imageMetaPrefix','imageMetaSection','imageMetaTitle','imageCornerLabel'];
 const IMAGE_EFFECTS = new Set(['none','fade','darken','scale','zoom','glow','archive']);
 const IMAGE_POSITIONS = new Set(['center','top','bottom','left','right']);
 const IMAGE_HOVER_EFFECTS = new Set(['none','scale','zoom','glow']);
@@ -599,6 +600,16 @@ function getImageWatermarkSettings(record={}){
     imageWatermarkOpacity:Number.isInteger(Number(input.imageWatermarkOpacity)) && Number(input.imageWatermarkOpacity) >= 0 && Number(input.imageWatermarkOpacity) <= 100 ? Number(input.imageWatermarkOpacity) : DEFAULT_IMAGE_WATERMARK_SETTINGS.imageWatermarkOpacity,
     imageWatermarkPosition:IMAGE_WATERMARK_POSITIONS.has(input.imageWatermarkPosition) ? input.imageWatermarkPosition : DEFAULT_IMAGE_WATERMARK_SETTINGS.imageWatermarkPosition
   };
+}
+
+function preserveOmittedImagePresentation(existing,input){
+  const preserved = {};
+  for(const field of IMAGE_PRESENTATION_FIELDS){
+    if(Object.prototype.hasOwnProperty.call(input,field)) continue;
+    if(Object.prototype.hasOwnProperty.call(existing,field)) preserved[field] = existing[field];
+    else if(field === 'imageCaption' && typeof existing.caption === 'string') preserved.imageCaption = existing.caption;
+  }
+  return preserved;
 }
 
 function validateImageSettings(input,contentKind='poem'){
@@ -1925,18 +1936,23 @@ function scheduleImageDeletion(key,image){
   const state = imageEditorStates[key];
   if(isManagedEditorImage(image,imageEditorConfigs[key].category) && !state.pendingDeletePaths.includes(image)) state.pendingDeletePaths.push(image);
 }
-function updateImageEditorUrl(key,value){
+function setEditorImage(key,value,fileMetadata={}){
   const state = imageEditorStates[key];
   if(state.image && state.image !== value) scheduleImageDeletion(key,state.image);
   state.pendingDeletePaths = state.pendingDeletePaths.filter(image=>image !== value);
   const sameImage = state.image === value;
   state.image = value;
-  if(!sameImage){
-    state.imageName = value ? value.split('/').pop() : '';
-    state.imageSize = 0;
-  }
+  if(Object.prototype.hasOwnProperty.call(fileMetadata,'imageName')) state.imageName = fileMetadata.imageName;
+  else if(!sameImage) state.imageName = value ? value.split('/').pop() : '';
+  if(Object.prototype.hasOwnProperty.call(fileMetadata,'imageSize')) state.imageSize = fileMetadata.imageSize;
+  else if(!sameImage) state.imageSize = 0;
+  const input = document.getElementById(imageEditorConfigs[key].imageInput);
+  if(input) input.value = value;
   renderImageEditorPreview(key);
   if(activeImageEditor === key) renderImageEffectPreview();
+}
+function updateImageEditorUrl(key,value){
+  setEditorImage(key,value);
 }
 function formatImageSize(size){
   if(!size) return '';
@@ -2090,7 +2106,6 @@ async function uploadEditorImage(key,input){
   if(file.size > 10 * 1024 * 1024){showImageEditorError(key,'Размер изображения не должен превышать 10 MiB.');input.value='';return;}
   if(!file.size){showImageEditorError(key,'Файл изображения пуст.');input.value='';return;}
   const state = imageEditorStates[key];
-  const previousImage = state.image;
   const button = document.querySelector('#' + imageEditorConfigs[key].container + ' .image-editor-actions button');
   if(button) button.disabled = true;
   showImageEditorError(key,'Загружаем изображение в GitHub…');
@@ -2102,18 +2117,12 @@ async function uploadEditorImage(key,input){
     });
     const result = await response.json();
     if(!response.ok) throw new Error(result.error || 'Не удалось загрузить изображение');
-    if(previousImage && previousImage !== result.image) scheduleImageDeletion(key,previousImage);
     if(!state.newUploads.includes(result.image) && result.image !== state.initialImage) state.newUploads.push(result.image);
-    state.image = result.image;
-    state.imageName = result.imageName || file.name;
-    state.imageSize = result.imageSize || file.size;
-    document.getElementById(imageEditorConfigs[key].imageInput).value = state.image;
-    state.pendingDeletePaths = state.pendingDeletePaths.filter(image=>image !== state.image);
+    setEditorImage(key,result.image,{imageName:result.imageName || file.name,imageSize:result.imageSize || file.size});
     const error = document.getElementById('image-error-' + key);
     error.dataset.keepError = '';
     error.textContent = '';
     error.classList.remove('visible');
-    renderImageEditorPreview(key);
   }catch(error){
     showImageEditorError(key,error.message);
   }finally{
@@ -2122,15 +2131,7 @@ async function uploadEditorImage(key,input){
   }
 }
 function removeEditorImage(key){
-  const config = imageEditorConfigs[key];
-  const input = document.getElementById(config.imageInput);
-  const state = imageEditorStates[key];
-  if(state.image) scheduleImageDeletion(key,state.image);
-  state.image = '';
-  state.imageName = '';
-  state.imageSize = 0;
-  input.value = '';
-  renderImageEditorPreview(key);
+  setEditorImage(key,'',{imageName:'',imageSize:0});
 }
 async function deleteManagedImage(category,image){
   const response = await fetch('/api/images/delete',{
@@ -3637,7 +3638,7 @@ const server = http.createServer((req, res) => {
               throw error;
             }
             const updated = poems.slice();
-            updated[index] = {...updated[index],...validation.poem,id:getPoemId(updated[index],index)};
+            updated[index] = {...updated[index],...validation.poem,...preserveOmittedImagePresentation(updated[index],input),id:getPoemId(updated[index],index)};
             return updated;
           },'Edit poem from admin panel').then(poems=>{
             sendJson(res, 200, {poems});
@@ -3776,7 +3777,7 @@ const server = http.createServer((req, res) => {
             throw error;
           }
           const updated = cycles.slice();
-          updated[index] = {...updated[index],...validation.cycle,id:getCycleId(updated[index],index)};
+          updated[index] = {...updated[index],...validation.cycle,...preserveOmittedImagePresentation(updated[index],input),id:getCycleId(updated[index],index)};
           return updated;
         },'Edit cycle from admin panel').then(cycles=>{
           sendJson(res, 200, {cycles});
@@ -3866,7 +3867,7 @@ const server = http.createServer((req, res) => {
               throw error;
             }
             const updated = prose.slice();
-            updated[index] = {...updated[index],...validation.prose,id:getProseId(updated[index],index)};
+            updated[index] = {...updated[index],...validation.prose,...preserveOmittedImagePresentation(updated[index],input),id:getProseId(updated[index],index)};
             return updated;
           },'Edit prose from admin panel').then(prose=>{
             sendJson(res,200,{prose});
