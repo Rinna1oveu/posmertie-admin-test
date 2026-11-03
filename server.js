@@ -20,9 +20,22 @@ const GITHUB_CYCLES_FILE_PATH = 'data/cycles.json';
 const GITHUB_CYCLES_FILE_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${GITHUB_CYCLES_FILE_PATH}`;
 const GITHUB_PROSE_FILE_PATH = 'data/prose.json';
 const GITHUB_PROSE_FILE_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${GITHUB_PROSE_FILE_PATH}`;
-let poemWriteQueue = Promise.resolve();
-let cycleWriteQueue = Promise.resolve();
-let proseWriteQueue = Promise.resolve();
+const GITHUB_IMAGE_CATEGORIES = new Set(['poems','prose','cycles']);
+const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
+// Serialize all GitHub content mutations in this process. Image reference checks
+// and deletion must not interleave with edits to poems, prose, or cycles.
+let githubWriteQueue = Promise.resolve();
+const publishedImageSettingsCache = new Map();
+
+function queueGitHubMutation(mutate){
+  const operation = githubWriteQueue.then(mutate);
+  githubWriteQueue = operation.then(()=>undefined,()=>undefined);
+  return operation;
+}
+
+function invalidatePublishedImageCache(...categories){
+  for(const category of categories) publishedImageSettingsCache.delete(category);
+}
 
 async function initializeAdminPasswordVerifier(){
   let password = process.env.ADMIN_PASSWORD || '';
@@ -147,19 +160,19 @@ function getPoemId(poem, index){
   return `legacy-${crypto.createHash('sha256').update(signature).digest('hex').slice(0, 24)}`;
 }
 
-async function githubRequest(method, body, fileUrl=GITHUB_FILE_URL){
+async function githubRequest(method, body, fileUrl=GITHUB_FILE_URL,accept='application/vnd.github+json',timeoutMs=15000){
   const token = process.env.GITHUB_TOKEN;
   if(!token) throw githubApiError(503, 'GITHUB_TOKEN_MISSING');
 
   const headers = {
-    'Accept':'application/vnd.github+json',
+    'Accept':accept,
     'Authorization':`Bearer ${token}`,
     'X-GitHub-Api-Version':'2022-11-28'
   };
   const options = {
     method,
     headers,
-    signal:AbortSignal.timeout(15000)
+    signal:AbortSignal.timeout(timeoutMs)
   };
 
   if(body){
@@ -171,6 +184,299 @@ async function githubRequest(method, body, fileUrl=GITHUB_FILE_URL){
     ? `${fileUrl}?ref=${encodeURIComponent(GITHUB_BRANCH)}`
     : fileUrl;
   return fetch(url, options);
+}
+
+function getGitHubContentsUrl(filePath){
+  const encodedPath = filePath.split('/').map(segment=>encodeURIComponent(segment)).join('/');
+  return `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${encodedPath}`;
+}
+
+function getManagedImageInfo(imagePath,category){
+  if(typeof category !== 'string' || !GITHUB_IMAGE_CATEGORIES.has(category) || typeof imagePath !== 'string') return null;
+  const match = imagePath.match(/^\/images\/(poems|prose|cycles)\/([a-f0-9]{64})\.(jpe?g|png|webp)$/i);
+  if(!match || match[1] !== category) return null;
+  const extension = match[3].toLowerCase();
+  return {category:match[1],hash:match[2].toLowerCase(),extension,filePath:`images/${match[1]}/${match[2].toLowerCase()}.${extension}`};
+}
+
+function imageExtensionForName(fileName){
+  if(typeof fileName !== 'string' || fileName.length > 255 || /[\\/]/.test(fileName)) return '';
+  const extension = path.extname(fileName).toLowerCase();
+  return ['.jpg','.jpeg','.png','.webp'].includes(extension) ? extension.slice(1) : '';
+}
+
+function imageBytesMatchType(bytes,extension){
+  if(extension === 'jpg' || extension === 'jpeg') return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  if(extension === 'png') return bytes.length >= 8 && bytes.subarray(0,8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]));
+  if(extension === 'webp') return bytes.length >= 12 && bytes.toString('ascii',0,4) === 'RIFF' && bytes.toString('ascii',8,12) === 'WEBP';
+  return false;
+}
+
+function getImageDimensions(bytes,extension){
+  let width = 0;
+  let height = 0;
+  if(extension === 'png' && bytes.length >= 24){
+    width = bytes.readUInt32BE(16);
+    height = bytes.readUInt32BE(20);
+  }else if(extension === 'jpg' || extension === 'jpeg'){
+    let offset = 2;
+    while(offset + 9 < bytes.length){
+      if(bytes[offset] !== 0xff){offset++;continue;}
+      while(offset < bytes.length && bytes[offset] === 0xff) offset++;
+      const marker = bytes[offset++];
+      if(marker === 0xd8 || marker === 0xd9 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+      if(offset + 1 >= bytes.length) break;
+      const segmentLength = bytes.readUInt16BE(offset);
+      if(segmentLength < 2 || offset + segmentLength > bytes.length) break;
+      if([0xc0,0xc1,0xc2,0xc3,0xc5,0xc6,0xc7,0xc9,0xca,0xcb,0xcd,0xce,0xcf].includes(marker) && segmentLength >= 7){
+        height = bytes.readUInt16BE(offset + 3);
+        width = bytes.readUInt16BE(offset + 5);
+        break;
+      }
+      offset += segmentLength;
+    }
+  }else if(extension === 'webp' && bytes.length >= 30){
+    const chunk = bytes.toString('ascii',12,16);
+    if(chunk === 'VP8X'){
+      width = 1 + bytes.readUIntLE(24,3);
+      height = 1 + bytes.readUIntLE(27,3);
+    }else if(chunk === 'VP8L' && bytes[20] === 0x2f){
+      width = 1 + bytes[21] + ((bytes[22] & 0x3f) << 8);
+      height = 1 + ((bytes[22] >> 6) | (bytes[23] << 2) | ((bytes[24] & 0x0f) << 10));
+    }else if(chunk === 'VP8 ' && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a){
+      width = bytes.readUInt16LE(26) & 0x3fff;
+      height = bytes.readUInt16LE(28) & 0x3fff;
+    }
+  }
+  if(!Number.isInteger(width) || width < 1 || width > 100000 || !Number.isInteger(height) || height < 1 || height > 100000) return {width:1000,height:750};
+  return {width,height};
+}
+
+function renderPublicWatermarkedImage(bytes,extension,settings){
+  if(!settings.imageWatermark) return {bytes,contentType:extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : `image/${extension}`};
+  const {width,height} = getImageDimensions(bytes,extension);
+  const opacity = Math.max(0,Math.min(100,settings.imageWatermarkOpacity)) / 100;
+  const margin = Math.max(12,Math.round(Math.min(width,height) * .035));
+  const fontSize = Math.max(18,Math.min(72,Math.round(Math.min(width,height) * .055)));
+  const positions = {
+    'top-left':{x:margin,y:margin + fontSize,anchor:'start'},
+    'top-right':{x:width - margin,y:margin + fontSize,anchor:'end'},
+    center:{x:Math.round(width / 2),y:Math.round(height / 2),anchor:'middle'},
+    'bottom-left':{x:margin,y:height - margin,anchor:'start'},
+    'bottom-right':{x:width - margin,y:height - margin,anchor:'end'}
+  };
+  const position = positions[settings.imageWatermarkPosition] || positions['bottom-right'];
+  const mime = extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : `image/${extension}`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><image x="0" y="0" width="${width}" height="${height}" preserveAspectRatio="none" href="data:${mime};base64,${bytes.toString('base64')}"/><text x="${position.x}" y="${position.y}" text-anchor="${position.anchor}" fill="#fff" fill-opacity="${opacity}" stroke="#000" stroke-opacity="${Math.min(.72,opacity)}" stroke-width="${Math.max(1,Math.round(fontSize * .07))}" paint-order="stroke" font-family="Georgia, 'Times New Roman', serif" font-size="${fontSize}" font-weight="700">© Ринна</text></svg>`;
+  return {bytes:Buffer.from(svg,'utf8'),contentType:'image/svg+xml; charset=utf-8'};
+}
+
+async function readGitHubImage(filePath){
+  const fileUrl = getGitHubContentsUrl(filePath);
+  const response = await githubRequest('GET',undefined,fileUrl,'application/vnd.github.object+json',60000);
+  if(response.status === 404) return null;
+  if(!response.ok) throw githubApiError(response.status,'GITHUB_IMAGE_READ_FAILED');
+  try{
+    const file = await response.json();
+    if(typeof file.sha !== 'string') throw new Error('Invalid image response');
+    if(file.encoding === 'base64' && typeof file.content === 'string' && file.content.trim()){
+      return {sha:file.sha,bytes:Buffer.from(file.content.replace(/\s/g,''),'base64')};
+    }
+    const rawResponse = await githubRequest('GET',undefined,fileUrl,'application/vnd.github.raw+json',60000);
+    if(!rawResponse.ok) throw githubApiError(rawResponse.status,'GITHUB_IMAGE_READ_FAILED');
+    return {sha:file.sha,bytes:Buffer.from(await rawResponse.arrayBuffer())};
+  }catch(error){
+    if(error.status) throw error;
+    throw githubApiError(502,'INVALID_GITHUB_IMAGE_FILE');
+  }
+}
+
+async function writeGitHubImage(filePath,bytes){
+  const body = {
+    message:`Add image ${path.basename(filePath)}`,
+    content:bytes.toString('base64'),
+    branch:GITHUB_BRANCH
+  };
+  const response = await githubRequest('PUT',body,getGitHubContentsUrl(filePath),undefined,60000);
+  if(!response.ok) throw githubApiError(response.status,'GITHUB_IMAGE_WRITE_FAILED');
+}
+
+async function uploadImageToGitHub(category,fileName,contentType,contentBase64){
+  if(!GITHUB_IMAGE_CATEGORIES.has(category)) throw githubApiError(400,'INVALID_IMAGE_CATEGORY');
+  const extension = imageExtensionForName(fileName);
+  if(!extension) throw githubApiError(400,'INVALID_IMAGE_FORMAT');
+  if(typeof contentBase64 !== 'string' || !contentBase64.length || contentBase64.length > Math.ceil(MAX_IMAGE_SIZE_BYTES / 3) * 4 + 8 || contentBase64.length % 4 !== 0){
+    throw githubApiError(400,'INVALID_IMAGE_DATA');
+  }
+  const padding = contentBase64.endsWith('==') ? 2 : contentBase64.endsWith('=') ? 1 : 0;
+  const dataLength = contentBase64.length - padding;
+  if(contentBase64.indexOf('=') !== (padding ? dataLength : -1) || !/^[A-Za-z0-9+/]+$/.test(contentBase64.slice(0,dataLength)) || (padding === 1 && dataLength % 4 !== 3) || (padding === 2 && dataLength % 4 !== 2)){
+    throw githubApiError(400,'INVALID_IMAGE_DATA');
+  }
+  const bytes = Buffer.from(contentBase64,'base64');
+  if(!bytes.length || bytes.length > MAX_IMAGE_SIZE_BYTES) throw githubApiError(413,'IMAGE_SIZE_LIMIT');
+  if(bytes.toString('base64') !== contentBase64) throw githubApiError(400,'INVALID_IMAGE_DATA');
+  const expectedMime = extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : `image/${extension}`;
+  if(contentType !== expectedMime) throw githubApiError(400,'INVALID_IMAGE_FORMAT');
+  if(!imageBytesMatchType(bytes,extension)) throw githubApiError(400,'INVALID_IMAGE_FORMAT');
+
+  const hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  const filePath = `images/${category}/${hash}.${extension}`;
+  for(let attempt=0;attempt<3;attempt++){
+    const existing = await readGitHubImage(filePath);
+    if(existing){
+      const existingHash = crypto.createHash('sha256').update(existing.bytes).digest('hex');
+      if(existingHash !== hash) throw githubApiError(409,'GITHUB_IMAGE_HASH_CONFLICT');
+      return {image:`/${filePath}`,imageName:fileName.replace(/[^\p{L}\p{N}._ -]/gu,'_').slice(0,255),imageSize:bytes.length};
+    }
+    try{
+      await writeGitHubImage(filePath,bytes);
+      return {image:`/${filePath}`,imageName:fileName.replace(/[^\p{L}\p{N}._ -]/gu,'_').slice(0,255),imageSize:bytes.length};
+    }catch(error){
+      if((error.status === 409 || error.status === 422) && attempt < 2) continue;
+      throw error;
+    }
+  }
+  throw githubApiError(409,'GITHUB_IMAGE_WRITE_CONFLICT');
+}
+
+async function imageIsReferenced(category,imagePath){
+  if(category === 'poems'){
+    const {poems} = await readPoemsFromGitHub();
+    return poems.some(poem=>poem.image === imagePath);
+  }
+  if(category === 'prose'){
+    const {prose} = await readProseFromGitHub();
+    return prose.some(entry=>entry.image === imagePath);
+  }
+  const {cycles} = await readCyclesFromGitHub();
+  return cycles.some(cycle=>cycle.image === imagePath || cycle.cover === imagePath);
+}
+
+async function getPublishedImageReferences(category,imagePath){
+  const now = Date.now();
+  let cached = publishedImageSettingsCache.get(category);
+  if(!cached || (cached.expiresAt <= now && !cached.promise)){
+    cached = {expiresAt:0,settings:null,promise:null};
+    const promise = (async()=>{
+      let entries;
+      if(category === 'poems'){
+        const {poems} = await readPoemsFromGitHub();
+        entries = poems.map((poem,index)=>[poem.image,poem,getPoemId(poem,index)]).filter(([imagePath,poem])=>poem.status !== 'draft' && imagePath);
+      }else if(category === 'prose'){
+        const {prose} = await readProseFromGitHub();
+        entries = prose.map((entry,index)=>[entry.image,entry,getProseId(entry,index)]).filter(([imagePath,entry])=>entry.status !== 'draft' && imagePath);
+      }else{
+        const {cycles} = await readCyclesFromGitHub();
+        entries = cycles.map((cycle,index)=>[cycle,index]).filter(([cycle])=>cycle.status !== 'draft').flatMap(([cycle,index])=>[[cycle.image,cycle,getCycleId(cycle,index)],[cycle.cover,cycle,getCycleId(cycle,index)]]).filter(([imagePath])=>imagePath);
+      }
+      cached.settings = new Map();
+      for(const [pathValue,record,id] of entries){
+        if(typeof pathValue !== 'string' || !pathValue) continue;
+        if(!cached.settings.has(pathValue)) cached.settings.set(pathValue,[]);
+        cached.settings.get(pathValue).push({id,settings:getImageWatermarkSettings(record)});
+      }
+      cached.expiresAt = Date.now() + 30_000;
+      return cached.settings;
+    })();
+    cached.promise = promise;
+    publishedImageSettingsCache.set(category,cached);
+    try{await promise;}catch(error){publishedImageSettingsCache.delete(category);throw error;}finally{cached.promise = null;}
+  }else if(cached.promise){
+    await cached.promise;
+  }
+  return cached.settings && cached.settings.has(imagePath) ? cached.settings.get(imagePath) : [];
+}
+
+async function getPublishedRecordImage(type,id){
+  let category;
+  let record;
+  if(type === 'poem'){
+    category = 'poems';
+    const {poems} = await readPoemsFromGitHub();
+    const index = poems.findIndex((poem,position)=>getPoemId(poem,position) === id);
+    if(index >= 0) record = poems[index];
+  }else if(type === 'prose'){
+    category = 'prose';
+    const {prose} = await readProseFromGitHub();
+    const index = prose.findIndex((entry,position)=>getProseId(entry,position) === id);
+    if(index >= 0) record = prose[index];
+  }else if(type === 'cycle'){
+    category = 'cycles';
+    const {cycles} = await readCyclesFromGitHub();
+    const index = cycles.findIndex((cycle,position)=>getCycleId(cycle,position) === id);
+    if(index >= 0) record = cycles[index];
+  }
+  if(!record || record.status === 'draft') return null;
+  const imagePath = typeof record.image === 'string' && record.image ? record.image : (category === 'cycles' && typeof record.cover === 'string' ? record.cover : '');
+  const info = getManagedImageInfo(imagePath,category);
+  if(!info) return null;
+  return {info,settings:getImageWatermarkSettings(record)};
+}
+
+async function sendPublicImage(res,info,settings){
+  const imageFile = await readGitHubImage(info.filePath);
+  if(!imageFile){sendJson(res,404,{error:'Изображение не найдено'});return;}
+  const image = renderPublicWatermarkedImage(imageFile.bytes,info.extension,settings);
+  res.writeHead(200,{
+    'Content-Type':image.contentType,
+    'Content-Length':image.bytes.length,
+    'Cache-Control':'public, max-age=300',
+    'Content-Disposition':'inline',
+    'Referrer-Policy':'no-referrer',
+    'X-Content-Type-Options':'nosniff'
+  });
+  res.end(image.bytes);
+}
+
+async function deleteImageFromGitHub(category,imagePath){
+  const info = getManagedImageInfo(imagePath,category);
+  if(!info) throw githubApiError(400,'INVALID_IMAGE_PATH');
+  if(await imageIsReferenced(category,imagePath)) throw githubApiError(409,'IMAGE_IN_USE');
+  const fileUrl = getGitHubContentsUrl(info.filePath);
+  for(let attempt=0;attempt<3;attempt++){
+    const existing = await readGitHubImage(info.filePath);
+    if(!existing) return {deleted:false};
+    const response = await githubRequest('DELETE',{
+      message:`Remove image ${path.basename(info.filePath)}`,
+      sha:existing.sha,
+      branch:GITHUB_BRANCH
+    },fileUrl,undefined,60000);
+    if(response.ok) return {deleted:true};
+    if((response.status === 409 || response.status === 422) && attempt < 2) continue;
+    throw githubApiError(response.status,'GITHUB_IMAGE_DELETE_FAILED');
+  }
+  throw githubApiError(409,'GITHUB_IMAGE_DELETE_CONFLICT');
+}
+
+function queueImageMutation(mutate){
+  return queueGitHubMutation(mutate);
+}
+
+function sendImageMutationError(res,error){
+  if(error.code === 'GITHUB_TOKEN_MISSING'){
+    sendJson(res,503,{error:'Хранилище изображений не настроено'});
+    return;
+  }
+  const clientErrors = new Map([
+    ['INVALID_IMAGE_CATEGORY',[400,'Выберите допустимый раздел для изображения']],
+    ['INVALID_IMAGE_FORMAT',[400,'Поддерживаются только JPG, JPEG, PNG и WebP']],
+    ['INVALID_IMAGE_DATA',[400,'Не удалось прочитать файл изображения']],
+    ['INVALID_IMAGE_PATH',[400,'Недопустимый путь к изображению']],
+    ['IMAGE_SIZE_LIMIT',[413,'Размер изображения не должен превышать 10 MiB']],
+    ['IMAGE_IN_USE',[409,'Изображение используется в сохранённой записи']],
+    ['GITHUB_IMAGE_HASH_CONFLICT',[409,'Не удалось безопасно сохранить изображение']],
+    ['GITHUB_IMAGE_WRITE_CONFLICT',[409,'Изображение изменилось в GitHub. Повторите попытку']],
+    ['GITHUB_IMAGE_DELETE_CONFLICT',[409,'Изображение изменилось в GitHub. Повторите попытку']]
+  ]);
+  const response = clientErrors.get(error.code);
+  if(response){
+    sendJson(res,response[0],{error:response[1]});
+    return;
+  }
+  if(error.status) console.error(`GitHub image operation failed with status ${error.status}`);
+  else console.error('GitHub image operation failed');
+  sendJson(res,502,{error:'Не удалось выполнить операцию с изображением'});
 }
 
 async function readPoemsFromGitHub(){
@@ -225,9 +531,54 @@ async function mutatePoemsOnGitHub(mutate, message){
 }
 
 function queuePoemMutation(mutate, message){
-  const operation = poemWriteQueue.then(()=>mutatePoemsOnGitHub(mutate, message));
-  poemWriteQueue = operation.then(()=>undefined, ()=>undefined);
-  return operation;
+  return queueGitHubMutation(()=>mutatePoemsOnGitHub(mutate, message)).then(result=>{
+    invalidatePublishedImageCache('poems');
+    return result;
+  });
+}
+
+const DEFAULT_IMAGE_SETTINGS = Object.freeze({imageEffect:'none',imagePosition:'center',imageScale:100,imageIntensity:50,imageOverlay:0,imageHover:'none'});
+const DEFAULT_IMAGE_WATERMARK_SETTINGS = Object.freeze({imageWatermark:true,imageWatermarkOpacity:42,imageWatermarkPosition:'bottom-right'});
+const IMAGE_EFFECTS = new Set(['none','fade','darken','scale','zoom','glow']);
+const IMAGE_POSITIONS = new Set(['center','top','bottom','left','right']);
+const IMAGE_HOVER_EFFECTS = new Set(['none','scale','zoom','glow']);
+const IMAGE_WATERMARK_POSITIONS = new Set(['top-left','top-right','center','bottom-left','bottom-right']);
+
+function getImageWatermarkSettings(record={}){
+  const input = record && typeof record === 'object' ? record : {};
+  return {
+    imageWatermark:typeof input.imageWatermark === 'boolean' ? input.imageWatermark : DEFAULT_IMAGE_WATERMARK_SETTINGS.imageWatermark,
+    imageWatermarkOpacity:Number.isInteger(Number(input.imageWatermarkOpacity)) && Number(input.imageWatermarkOpacity) >= 0 && Number(input.imageWatermarkOpacity) <= 100 ? Number(input.imageWatermarkOpacity) : DEFAULT_IMAGE_WATERMARK_SETTINGS.imageWatermarkOpacity,
+    imageWatermarkPosition:IMAGE_WATERMARK_POSITIONS.has(input.imageWatermarkPosition) ? input.imageWatermarkPosition : DEFAULT_IMAGE_WATERMARK_SETTINGS.imageWatermarkPosition
+  };
+}
+
+function validateImageSettings(input){
+  if(input.imageWatermark !== undefined && typeof input.imageWatermark !== 'boolean') return {error:'Настройка watermark должна быть включена или выключена'};
+  if(input.imageWatermarkOpacity !== undefined && (!Number.isInteger(input.imageWatermarkOpacity) || input.imageWatermarkOpacity < 0 || input.imageWatermarkOpacity > 100)) return {error:'Прозрачность watermark должна быть от 0 до 100%'};
+  if(input.imageWatermarkPosition !== undefined && !IMAGE_WATERMARK_POSITIONS.has(input.imageWatermarkPosition)) return {error:'Неизвестная позиция watermark'};
+  const settings = {
+    imageEffect:input.imageEffect === undefined ? DEFAULT_IMAGE_SETTINGS.imageEffect : (input.imageEffect === 'zoom' ? 'scale' : input.imageEffect),
+    imagePosition:input.imagePosition === undefined ? DEFAULT_IMAGE_SETTINGS.imagePosition : input.imagePosition,
+    imageScale:input.imageScale === undefined ? DEFAULT_IMAGE_SETTINGS.imageScale : Number(input.imageScale),
+    imageIntensity:input.imageIntensity === undefined ? DEFAULT_IMAGE_SETTINGS.imageIntensity : Number(input.imageIntensity),
+    imageOverlay:input.imageOverlay === undefined ? DEFAULT_IMAGE_SETTINGS.imageOverlay : Number(input.imageOverlay),
+    imageHover:input.imageHover === undefined ? DEFAULT_IMAGE_SETTINGS.imageHover : (input.imageHover === 'zoom' ? 'scale' : input.imageHover),
+    ...getImageWatermarkSettings(input)
+  };
+  if(!IMAGE_EFFECTS.has(settings.imageEffect) || !IMAGE_POSITIONS.has(settings.imagePosition) || !IMAGE_HOVER_EFFECTS.has(settings.imageHover)) return {error:'Неизвестный эффект или позиция изображения'};
+  if(!Number.isInteger(settings.imageScale) || settings.imageScale < 80 || settings.imageScale > 150) return {error:'Масштаб изображения должен быть от 80 до 150%'};
+  if(!Number.isInteger(settings.imageIntensity) || settings.imageIntensity < 0 || settings.imageIntensity > 100) return {error:'Интенсивность эффекта должна быть от 0 до 100%'};
+  if(!Number.isInteger(settings.imageOverlay) || settings.imageOverlay < 0 || settings.imageOverlay > 100) return {error:'Затемнение должно быть от 0 до 100%'};
+  if(typeof settings.imageWatermark !== 'boolean' || !Number.isInteger(settings.imageWatermarkOpacity) || settings.imageWatermarkOpacity < 0 || settings.imageWatermarkOpacity > 100 || !IMAGE_WATERMARK_POSITIONS.has(settings.imageWatermarkPosition)) return {error:'Некорректные настройки watermark'};
+  return {settings};
+}
+
+function validateImageMetadata(input){
+  const imageName = typeof input.imageName === 'string' ? input.imageName.slice(0,255) : '';
+  const imageSize = input.imageSize === undefined || input.imageSize === '' ? 0 : Number(input.imageSize);
+  if(!Number.isSafeInteger(imageSize) || imageSize < 0 || imageSize > MAX_IMAGE_SIZE_BYTES) return {error:'Размер изображения должен быть не больше 10 MiB'};
+  return {imageName,imageSize};
 }
 
 function validatePoem(input){
@@ -236,7 +587,10 @@ function validatePoem(input){
   const date = typeof input.date === 'string' ? input.date.trim() : '';
   const status = input.status === undefined ? 'published' : input.status;
   const image = typeof input.image === 'string' ? input.image.trim() : '';
-  const caption = typeof input.caption === 'string' ? input.caption.trim() : '';
+  const captionValue = typeof input.imageCaption === 'string' ? input.imageCaption : input.caption;
+  const caption = typeof captionValue === 'string' ? captionValue.trim() : '';
+  const imageSettings = validateImageSettings(input);
+  const imageMetadata = validateImageMetadata(input);
 
   if(!title || !text) return {error:'Название и текст обязательны'};
   if(title.length > 300 || text.length > 1000000) return {error:'Название или текст слишком длинные'};
@@ -247,10 +601,12 @@ function validatePoem(input){
   }
   if(status !== 'published' && status !== 'draft') return {error:'Неизвестный статус стихотворения'};
   if(image.length > 2048 || caption.length > 500) return {error:'Ссылка или подпись к иллюстрации слишком длинная'};
+  if(imageSettings.error) return imageSettings;
+  if(imageMetadata.error) return imageMetadata;
   const hasUnsupportedScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(image) && !image.startsWith('http://') && !image.startsWith('https://');
   if(image && (hasUnsupportedScheme || !(image.startsWith('http://') || image.startsWith('https://') || image.startsWith('/') || /^[a-zA-Z0-9._-]/.test(image)))) return {error:'Укажите ссылку или путь к изображению'};
 
-  return {poem:{title,text,date,status,image,caption}};
+  return {poem:{title,text,date,status,image,caption,imageCaption:caption,...imageSettings.settings,...imageMetadata}};
 }
 
 function sendPoemMutationError(res, error){
@@ -325,9 +681,10 @@ async function mutateCyclesOnGitHub(mutate, message){
 }
 
 function queueCycleMutation(mutate, message){
-  const operation = cycleWriteQueue.then(()=>mutateCyclesOnGitHub(mutate, message));
-  cycleWriteQueue = operation.then(()=>undefined, ()=>undefined);
-  return operation;
+  return queueGitHubMutation(()=>mutateCyclesOnGitHub(mutate, message)).then(result=>{
+    invalidatePublishedImageCache('cycles');
+    return result;
+  });
 }
 
 function getProseId(entry,index){
@@ -390,9 +747,10 @@ async function mutateProseOnGitHub(mutate, message){
 }
 
 function queueProseMutation(mutate, message){
-  const operation = proseWriteQueue.then(()=>mutateProseOnGitHub(mutate, message));
-  proseWriteQueue = operation.then(()=>undefined, ()=>undefined);
-  return operation;
+  return queueGitHubMutation(()=>mutateProseOnGitHub(mutate, message)).then(result=>{
+    invalidatePublishedImageCache('prose');
+    return result;
+  });
 }
 
 function validateProse(input){
@@ -404,6 +762,8 @@ function validateProse(input){
   const date = typeof input.date === 'string' ? input.date.trim() : '';
   const image = typeof input.image === 'string' ? input.image.trim() : '';
   const imageCaption = typeof input.imageCaption === 'string' ? input.imageCaption.trim() : '';
+  const imageSettings = validateImageSettings(input);
+  const imageMetadata = validateImageMetadata(input);
 
   if(!title) return {error:'Название произведения обязательно'};
   if(title.length > 300 || description.length > 10000 || text.length > 1000000) return {error:'Название, описание или текст слишком длинные'};
@@ -416,9 +776,11 @@ function validateProse(input){
   }
   const hasUnsupportedScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(image) && !image.startsWith('http://') && !image.startsWith('https://');
   if(image.length > 2048 || imageCaption.length > 500) return {error:'Ссылка или подпись к иллюстрации слишком длинная'};
+  if(imageSettings.error) return imageSettings;
+  if(imageMetadata.error) return imageMetadata;
   if(image && (hasUnsupportedScheme || !(image.startsWith('http://') || image.startsWith('https://') || image.startsWith('/') || /^[a-zA-Z0-9._-]/.test(image)))) return {error:'Укажите ссылку или путь к изображению'};
 
-  return {prose:{title,type,description,text,status,date,image,imageCaption}};
+  return {prose:{title,type,description,text,status,date,image,imageCaption,...imageSettings.settings,...imageMetadata}};
 }
 
 function sendProseGitHubError(res,error,action){
@@ -548,31 +910,36 @@ async function deletePoemWithCycleCleanup(poemId){
 }
 
 function queuePoemDeletionWithCycleCleanup(poemId){
-  const pendingWrites = Promise.all([poemWriteQueue,cycleWriteQueue]);
-  const operation = pendingWrites.then(()=>deletePoemWithCycleCleanup(poemId));
-  const nextWrite = operation.then(()=>undefined,()=>undefined);
-  poemWriteQueue = nextWrite;
-  cycleWriteQueue = nextWrite;
-  return operation;
+  return queueGitHubMutation(()=>deletePoemWithCycleCleanup(poemId)).then(result=>{
+    invalidatePublishedImageCache('poems','cycles');
+    return result;
+  });
 }
 
 function validateCycle(input, existingPoemIds){
   const title = typeof input.title === 'string' ? input.title.trim() : '';
   const description = typeof input.description === 'string' ? input.description.trim() : '';
   const status = input.status === undefined ? 'published' : input.status;
-  const cover = typeof input.cover === 'string' ? input.cover.trim() : '';
+  const imageValue = typeof input.image === 'string' ? input.image : input.cover;
+  const cover = typeof imageValue === 'string' ? imageValue.trim() : '';
+  const imageCaption = typeof input.imageCaption === 'string' ? input.imageCaption.trim() : '';
   const poemIds = input.poemIds;
+  const imageSettings = validateImageSettings(input);
+  const imageMetadata = validateImageMetadata(input);
 
   if(!title) return {error:'Название цикла обязательно'};
   if(title.length > 300 || description.length > 10000) return {error:'Название или описание цикла слишком длинные'};
   if(status !== 'published' && status !== 'draft') return {error:'Неизвестный статус цикла'};
+  if(imageCaption.length > 500) return {error:'Подпись к иллюстрации слишком длинная'};
+  if(imageSettings.error) return imageSettings;
+  if(imageMetadata.error) return imageMetadata;
   const hasUnsupportedScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(cover) && !cover.startsWith('http://') && !cover.startsWith('https://');
   if(cover.length > 2048 || (cover && (hasUnsupportedScheme || !(cover.startsWith('http://') || cover.startsWith('https://') || cover.startsWith('/') || /^[a-zA-Z0-9._-]/.test(cover))))) return {error:'Укажите ссылку или путь к обложке'};
   if(!Array.isArray(poemIds) || poemIds.length > 500 || poemIds.some(id=>typeof id !== 'string' || !id)) return {error:'Неверный список стихотворений'};
   if(new Set(poemIds).size !== poemIds.length) return {error:'Стихотворение уже добавлено в цикл'};
   if(poemIds.some(id=>!existingPoemIds.has(id))) return {error:'В цикле могут быть только существующие стихотворения'};
 
-  return {cycle:{title,description,status,cover,poemIds:[...poemIds]}};
+  return {cycle:{title,description,status,cover,image:cover,imageCaption,poemIds:[...poemIds],...imageSettings.settings,...imageMetadata}};
 }
 
 function sendCycleMutationError(res, error){
@@ -594,13 +961,13 @@ function sendGitHubError(res, error, action){
   sendJson(res, 502, {error:action === 'read' ? 'Не удалось загрузить стихотворения' : 'Не удалось сохранить стихотворение'});
 }
 
-function readRequestBody(req){
+function readRequestBody(req,maxBytes=1024 * 1024){
   return new Promise((resolve, reject)=>{
     let body = '';
     req.setEncoding('utf8');
     req.on('data', chunk=>{
       body += chunk;
-      if(body.length > 1024 * 1024){
+      if(Buffer.byteLength(body,'utf8') > maxBytes){
         reject(new Error('Request body is too large'));
         req.destroy();
       }
@@ -924,6 +1291,49 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .preview-figure img{display:block;max-width:100%;max-height:440px;margin:0 auto;object-fit:contain}
 .preview-figure figcaption{margin-top:10px;color:#a58a91;text-align:center;font:italic 13px Georgia,"Times New Roman",serif}
 .preview-status{margin-top:26px;color:#a83b53;font-size:9px;font-weight:700;letter-spacing:.2em;text-transform:uppercase}
+.image-editor{padding:15px;border:1px solid #421722;background:linear-gradient(145deg,#170b10,#10080b)}
+.image-editor-layout{display:grid;grid-template-columns:minmax(150px,220px) minmax(0,1fr);gap:16px}
+.image-editor-preview{position:relative;display:grid;place-items:center;min-height:145px;overflow:hidden;border:1px solid #5a1c2d;background:#0b0709}
+.image-editor-preview img{width:100%;height:100%;min-height:145px;object-fit:cover}
+.image-editor-preview img,.image-effect-preview-frame img,.preview-figure img{-webkit-user-drag:none;user-select:none}
+.image-editor-preview img[hidden]{display:none}
+.image-editor-placeholder{padding:12px;color:#806b72;text-align:center;font:italic 12px/1.5 Georgia,"Times New Roman",serif}
+.image-editor-controls{min-width:0}
+.image-editor-controls label:first-child{margin-top:0}
+.image-editor-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:11px}
+.image-editor-actions button{padding:8px 11px;font-size:12px}
+.image-editor-actions .btn-secondary:after{content:""}
+.image-editor-meta{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:9px;color:#987d84;font-size:10px;letter-spacing:.04em}
+.image-editor-error{display:none;margin-top:8px;color:#ff9ca7;font-size:12px}
+.image-editor-error.visible{display:block}
+.image-effect-button{margin-top:12px}
+.image-effect-button:after{content:""}
+.image-effect-dialog{width:min(100%,920px);max-height:min(92vh,1000px);overflow:auto;background:#10080b;border:1px solid #762038;box-shadow:0 24px 100px #000b}
+.image-effect-content{padding:22px}
+.image-effect-content .panel-heading{justify-content:flex-start}
+.image-effect-content .panel-heading h2{margin-top:3px}
+.image-effect-preview-frame{position:relative;height:280px;overflow:hidden;border:1px solid #682035;background:#0a0608}
+.image-effect-preview-frame img{width:100%;height:100%;object-fit:cover;transition:opacity .35s,transform .35s,filter .35s,box-shadow .35s}
+.image-effect-preview-frame img[hidden]{display:none}
+.image-effect-preview-overlay{position:absolute;inset:0;pointer-events:none;transition:background .2s}
+.image-effect-preview-empty{position:absolute;inset:0;display:grid;place-items:center;color:#806b72;font:italic 14px Georgia,"Times New Roman",serif}
+.image-effect-preview-empty[hidden]{display:none}
+.image-watermark-layer,.image-effect-watermark{position:absolute;z-index:4;pointer-events:none;color:#fff;font:700 19px/1.2 Georgia,"Times New Roman",serif;letter-spacing:.03em;text-shadow:0 2px 5px #000,0 0 2px #000;user-select:none;-webkit-user-select:none}
+.image-watermark-layer[data-position="top-left"],.image-effect-watermark[data-position="top-left"]{top:12px;left:12px}
+.image-watermark-layer[data-position="top-right"],.image-effect-watermark[data-position="top-right"]{top:12px;right:12px}
+.image-watermark-layer[data-position="center"],.image-effect-watermark[data-position="center"]{top:50%;left:50%;transform:translate(-50%,-50%)}
+.image-watermark-layer[data-position="bottom-left"],.image-effect-watermark[data-position="bottom-left"]{bottom:12px;left:12px}
+.image-watermark-layer[data-position="bottom-right"],.image-effect-watermark[data-position="bottom-right"]{bottom:12px;right:12px}
+.image-hover-toggle{margin-top:9px;padding:7px 10px;font-size:11px}
+.image-hover-toggle:after{content:""}
+.image-hover-toggle.active{border-color:#bf3150;background:#35101b;color:#fff}
+.image-effect-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px;margin-top:8px}
+.image-effect-controls select{width:100%;padding:12px;background:#0b0709;color:#f5eff0;border:1px solid #51202a;border-radius:2px}
+.image-effect-controls select:focus{outline:2px solid #ee234922;border-color:var(--accent)}
+.image-effect-controls input[type="range"]{padding:9px 0;border:0;background:transparent;accent-color:var(--accent)}
+.image-effect-controls input[type="checkbox"]{width:auto;margin-right:7px;accent-color:var(--accent)}
+.image-effect-controls output{float:right;color:#e78697;font-size:11px}
+.image-effect-controls .editor-field-wide{grid-column:1/-1}
 .cycle-picker{display:flex;align-items:stretch;gap:9px}
 .cycle-picker select{flex:1;min-width:0;padding:11px 12px;background:#0b0709;color:#f5eff0;border:1px solid #51202a;border-radius:2px}
 .cycle-picker button:disabled{opacity:.45;cursor:not-allowed}
@@ -995,6 +1405,11 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
   .hero-mascot{height:100px;max-width:24%}
   .editor-fields{grid-template-columns:1fr}
   .editor-field-wide{grid-column:auto}
+  .image-editor-layout{grid-template-columns:1fr}
+  .image-editor-preview{min-height:180px}
+  .image-effect-controls{grid-template-columns:1fr}
+  .image-effect-controls .editor-field-wide{grid-column:auto}
+  .image-effect-preview-frame{height:210px}
   .cycle-picker{flex-direction:column}
   .stats{gap:9px}
   .stat-card{padding:15px 13px}
@@ -1133,14 +1548,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
                 <option value="draft">Черновик</option>
               </select>
             </div>
-            <div class="editor-field editor-field-wide">
-              <label for="poem-image">Иллюстрация — ссылка или путь</label>
-              <input id="poem-image" name="image" type="text" inputmode="url" maxlength="2048" placeholder="/images/poem.jpg или https://…">
-            </div>
-            <div class="editor-field editor-field-wide">
-              <label for="poem-caption">Подпись к иллюстрации <span class="optional">необязательно</span></label>
-              <input id="poem-caption" name="caption" type="text" maxlength="500" placeholder="Подпись">
-            </div>
+            <div class="editor-field editor-field-wide"><div id="poem-image-editor"></div></div>
           </div>
           <div class="poem-cycle-editor">
             <div class="poem-cycle-editor-title">Циклы</div>
@@ -1206,10 +1614,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
                 <option value="draft">Черновик</option>
               </select>
             </div>
-            <div class="editor-field">
-              <label for="cycle-cover">Обложка — ссылка или путь</label>
-              <input id="cycle-cover" name="cover" type="text" inputmode="url" maxlength="2048" placeholder="/images/cycle.jpg или https://…">
-            </div>
+            <div class="editor-field editor-field-wide"><div id="cycle-image-editor"></div></div>
             <div class="editor-field editor-field-wide">
               <label for="cycle-poem-picker">Добавить существующее стихотворение</label>
               <div class="cycle-picker">
@@ -1286,14 +1691,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
                 <option value="draft">Черновик</option>
               </select>
             </div>
-            <div class="editor-field editor-field-wide">
-              <label for="prose-image">Иллюстрация — ссылка или путь</label>
-              <input id="prose-image" name="image" type="text" inputmode="url" maxlength="2048" placeholder="/images/story.jpg или https://…">
-            </div>
-            <div class="editor-field editor-field-wide">
-              <label for="prose-image-caption">Подпись к иллюстрации <span class="optional">необязательно</span></label>
-              <input id="prose-image-caption" name="imageCaption" type="text" maxlength="500" placeholder="Подпись">
-            </div>
+            <div class="editor-field editor-field-wide"><div id="prose-image-editor"></div></div>
           </div>
           <div class="editor-actions">
             <button class="btn" type="submit">Сохранить</button>
@@ -1335,6 +1733,34 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
       <div class="page-heading"><div class="eyebrow">Архив</div><h1>Настройки</h1><div class="subtitle">Состояние и сведения о панели</div></div>
       <div class="panel placeholder-panel"><div class="placeholder-glyph" aria-hidden="true">⚙</div><h2>Настройки архива</h2><div class="settings-row"><span>Хранилище стихов</span><span class="settings-value">GitHub Contents API</span></div><div class="settings-row"><span>Ветка данных</span><span class="settings-value">poems-data</span></div><div class="settings-row"><span>Сессия администратора</span><span class="settings-value">Защищённая, до 8 часов</span></div></div>
     </section>
+    <div class="preview-overlay" id="image-effect-overlay" hidden onclick="if(event.target===this)closeImageEffect(false)">
+      <section class="image-effect-dialog" role="dialog" aria-modal="true" aria-labelledby="image-effect-title">
+        <div class="preview-toolbar"><span>EDITOR / IMAGE EFFECT</span><button class="btn-secondary" type="button" onclick="closeImageEffect(false)">Закрыть <span aria-hidden="true">×</span></button></div>
+        <div class="image-effect-content">
+          <div class="panel-heading"><div><span class="panel-kicker">VISUAL SETTINGS</span><h2 id="image-effect-title">Эффект изображения</h2></div></div>
+          <div class="image-effect-preview-frame" id="image-effect-preview-frame">
+            <img id="image-effect-preview-image" alt="">
+            <div class="image-effect-preview-overlay" id="image-effect-preview-overlay"></div>
+            <span class="image-effect-watermark" id="image-effect-watermark" data-position="bottom-right">© Ринна</span>
+            <div class="image-effect-preview-empty" id="image-effect-preview-empty">Выберите изображение, чтобы увидеть preview</div>
+          </div>
+          <button class="btn-secondary image-hover-toggle" id="image-hover-toggle" type="button" onclick="toggleImageHoverPreview()">Показать hover</button>
+          <div class="image-effect-controls">
+            <div class="editor-field"><label for="image-effect-select">Эффект</label><select id="image-effect-select" onchange="updateImageEffectDraft()"><option value="none">Нет</option><option value="fade">Плавное появление</option><option value="darken">Затемнение</option><option value="scale">Увеличение</option><option value="glow">Свечение</option></select></div>
+            <div class="editor-field"><label for="image-position-select">Позиция</label><select id="image-position-select" onchange="updateImageEffectDraft()"><option value="center">Центр</option><option value="top">Сверху</option><option value="bottom">Снизу</option><option value="left">Слева</option><option value="right">Справа</option></select></div>
+            <div class="editor-field"><label for="image-scale-range">Масштаб <output id="image-scale-value">100%</output></label><input id="image-scale-range" type="range" min="80" max="150" step="1" value="100" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field"><label for="image-intensity-range">Интенсивность <output id="image-intensity-value">50%</output></label><input id="image-intensity-range" type="range" min="0" max="100" step="1" value="50" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field"><label for="image-overlay-range">Затемнение / Overlay <output id="image-overlay-value">0%</output></label><input id="image-overlay-range" type="range" min="0" max="100" step="1" value="0" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field"><label for="image-hover-select">Эффект при наведении</label><select id="image-hover-select" onchange="updateImageEffectDraft(true)"><option value="none">Нет</option><option value="scale">Увеличение</option><option value="glow">Свечение</option></select></div>
+            <div class="editor-field"><label><input id="image-watermark-toggle" type="checkbox" onchange="updateImageEffectDraft()"> Показывать watermark</label></div>
+            <div class="editor-field"><label for="image-watermark-position">Позиция watermark</label><select id="image-watermark-position" onchange="updateImageEffectDraft()"><option value="top-left">Сверху слева</option><option value="top-right">Сверху справа</option><option value="center">По центру</option><option value="bottom-left">Снизу слева</option><option value="bottom-right">Снизу справа</option></select></div>
+            <div class="editor-field editor-field-wide"><label for="image-watermark-opacity">Прозрачность watermark <output id="image-watermark-opacity-value">42%</output></label><input id="image-watermark-opacity" type="range" min="0" max="100" step="1" value="42" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field editor-field-wide"><label for="image-effect-caption">Подпись к изображению</label><input id="image-effect-caption" type="text" maxlength="500" placeholder="Подпись"></div>
+          </div>
+          <div class="editor-actions"><button class="btn" type="button" onclick="closeImageEffect(true)">Сохранить</button><button class="btn-secondary" type="button" onclick="closeImageEffect(false)">Отмена</button></div>
+        </div>
+      </section>
+    </div>
   </main>
 </div>
 <script>
@@ -1354,6 +1780,337 @@ let proseLoadPromise = null;
 let proseStatusFilter = 'all';
 let proseSearchTerm = '';
 let editingProseId = '';
+const imageEditorConfigs = {
+  poems:{category:'poems',container:'poem-image-editor',imageInput:'poem-image',captionInput:'poem-caption'},
+  prose:{category:'prose',container:'prose-image-editor',imageInput:'prose-image',captionInput:'prose-image-caption'},
+  cycles:{category:'cycles',container:'cycle-image-editor',imageInput:'cycle-cover',captionInput:'cycle-image-caption'}
+};
+const clientImageDefaults = {imageEffect:'none',imagePosition:'center',imageScale:100,imageIntensity:50,imageOverlay:0,imageHover:'none',imageWatermark:true,imageWatermarkOpacity:42,imageWatermarkPosition:'bottom-right'};
+function createImageEditorState(){
+  return {image:'',imageCaption:'',imageName:'',imageSize:0,...clientImageDefaults,initialImage:'',pendingDeletePaths:[],newUploads:[]};
+}
+let imageEditorStates = {poems:createImageEditorState(),prose:createImageEditorState(),cycles:createImageEditorState()};
+let activeImageEditor = '';
+let imageEffectDraft = null;
+let imageHoverPreview = false;
+
+function mountImageEditor(key){
+  const config = imageEditorConfigs[key];
+  const container = document.getElementById(config.container);
+  if(!container) return;
+  container.innerHTML = \`<div class="image-editor">
+    <div class="panel-heading"><h2>Иллюстрация</h2><span class="panel-kicker">IMAGE / \${config.category.toUpperCase()}</span></div>
+    <div class="image-editor-layout">
+      <div class="image-editor-preview"><img id="image-preview-\${key}" alt="" draggable="false" hidden><span class="image-watermark-layer" data-position="bottom-right" id="image-watermark-\${key}" hidden>© Ринна</span><div class="image-editor-placeholder" id="image-placeholder-\${key}">Предпросмотр изображения</div></div>
+      <div class="image-editor-controls">
+        <div class="image-editor-actions"><button class="btn-secondary" type="button" onclick="document.getElementById('image-file-\${key}').click()">Выбрать файл</button><input id="image-file-\${key}" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden onchange="uploadEditorImage('\${key}',this)"><button class="btn-danger" type="button" onclick="removeEditorImage('\${key}')">Удалить изображение</button></div>
+        <div class="image-editor-meta"><span id="image-name-\${key}">Файл не выбран</span><span id="image-size-\${key}"></span></div>
+        <label for="\${config.imageInput}">URL или путь</label><input id="\${config.imageInput}" name="image" type="text" inputmode="url" maxlength="2048" placeholder="/images/\${config.category}/… или https://…" oninput="updateEditorImageUrl('\${key}',this.value)">
+        <label for="\${config.captionInput}">Подпись к изображению <span class="optional">необязательно</span></label><input id="\${config.captionInput}" name="imageCaption" type="text" maxlength="500" placeholder="Подпись">
+        <button class="btn-secondary image-effect-button" type="button" onclick="openImageEffect('\${key}')">✦ Настроить эффект</button>
+        <div class="image-editor-error" id="image-error-\${key}" role="alert"></div>
+      </div>
+    </div>
+  </div>\`;
+  renderImageEditorPreview(key);
+}
+function mountAllImageEditors(){
+  Object.keys(imageEditorConfigs).forEach(mountImageEditor);
+}
+function isManagedEditorImage(image,category){
+  if(typeof image !== 'string' || !image.startsWith('/images/' + category + '/')) return false;
+  const fileName = image.slice(image.lastIndexOf('/') + 1);
+  const dot = fileName.lastIndexOf('.');
+  const hash = fileName.slice(0,dot);
+  const extension = fileName.slice(dot + 1).toLowerCase();
+  return /^[a-f0-9]{64}$/i.test(hash) && ['jpg','jpeg','png','webp'].includes(extension);
+}
+function scheduleImageDeletion(key,image){
+  const state = imageEditorStates[key];
+  if(isManagedEditorImage(image,imageEditorConfigs[key].category) && !state.pendingDeletePaths.includes(image)) state.pendingDeletePaths.push(image);
+}
+function updateImageEditorUrl(key,value){
+  const state = imageEditorStates[key];
+  if(state.image && state.image !== value) scheduleImageDeletion(key,state.image);
+  state.pendingDeletePaths = state.pendingDeletePaths.filter(image=>image !== value);
+  const sameImage = state.image === value;
+  state.image = value;
+  if(!sameImage){
+    state.imageName = value ? value.split('/').pop() : '';
+    state.imageSize = 0;
+  }
+  renderImageEditorPreview(key);
+  if(activeImageEditor === key) renderImageEffectPreview();
+}
+function formatImageSize(size){
+  if(!size) return '';
+  return size >= 1024 * 1024 ? (size / (1024 * 1024)).toFixed(2) + ' MB' : Math.max(1,Math.round(size / 1024)) + ' KB';
+}
+function renderImageEditorPreview(key){
+  const state = imageEditorStates[key];
+  const config = imageEditorConfigs[key];
+  const image = document.getElementById('image-preview-' + key);
+  const placeholder = document.getElementById('image-placeholder-' + key);
+  if(!image || !placeholder) return;
+  const watermark = document.getElementById('image-watermark-' + key);
+  const source = safeImageSource(state.image);
+  if(source){
+    image.onerror = ()=>{image.hidden = true;placeholder.hidden = false;placeholder.textContent = 'Не удалось загрузить preview';};
+    image.onload = ()=>{image.hidden = false;placeholder.hidden = true;};
+    image.src = source;
+    image.hidden = false;
+    placeholder.hidden = true;
+  }else{
+    image.removeAttribute('src');
+    image.hidden = true;
+    placeholder.hidden = false;
+    placeholder.textContent = 'Предпросмотр изображения';
+  }
+  if(watermark){
+    watermark.hidden = !source || !imageEditorStates[key].imageWatermark;
+    watermark.dataset.position = imageEditorStates[key].imageWatermarkPosition;
+    watermark.style.opacity = String(imageEditorStates[key].imageWatermarkOpacity / 100);
+  }
+  const name = document.getElementById('image-name-' + key);
+  const size = document.getElementById('image-size-' + key);
+  if(name) name.textContent = state.imageName || (state.image ? state.image.split('/').pop() : 'Файл не выбран');
+  if(size) size.textContent = state.imageSize ? formatImageSize(state.imageSize) : '';
+  const error = document.getElementById('image-error-' + key);
+  if(error && !error.dataset.keepError){error.textContent='';error.classList.remove('visible');}
+  if(activeImageEditor === key) renderImageEffectPreview();
+}
+function initializeImageEditor(key,record){
+  const config = imageEditorConfigs[key];
+  const state = createImageEditorState();
+  state.image = (record && (record.image || (key === 'cycles' && record.cover))) || '';
+  state.imageCaption = record ? (typeof record.imageCaption === 'string' ? record.imageCaption : (key === 'poems' && typeof record.caption === 'string' ? record.caption : '')) : '';
+  state.imageName = record && record.imageName || (state.image ? state.image.split('/').pop() : '');
+  state.imageSize = record && Number(record.imageSize) || 0;
+  for(const setting of Object.keys(clientImageDefaults)){
+    if(!record || record[setting] === undefined) continue;
+    const value = record[setting];
+        if(setting === 'imageEffect' && ['none','fade','darken','scale','zoom','glow'].includes(value)) state[setting] = value === 'zoom' ? 'scale' : value;
+    else if(setting === 'imagePosition' && ['center','top','bottom','left','right'].includes(value)) state[setting] = value;
+    else if(setting === 'imageHover' && ['none','scale','zoom','glow'].includes(value)) state[setting] = value === 'zoom' ? 'scale' : value;
+    else if(setting === 'imageWatermark' && typeof value === 'boolean') state[setting] = value;
+    else if(setting === 'imageWatermarkPosition' && ['top-left','top-right','center','bottom-left','bottom-right'].includes(value)) state[setting] = value;
+    else if(['imageScale','imageIntensity','imageOverlay','imageWatermarkOpacity'].includes(setting) && Number.isInteger(Number(value))){
+      const number = Number(value);
+      const min = setting === 'imageScale' ? 80 : 0;
+      const max = setting === 'imageScale' ? 150 : 100;
+      if(number >= min && number <= max) state[setting] = number;
+    }
+  }
+  state.initialImage = state.image;
+  imageEditorStates[key] = state;
+  const imageInput = document.getElementById(config.imageInput);
+  const captionInput = document.getElementById(config.captionInput);
+  if(imageInput) imageInput.value = state.image;
+  if(captionInput) captionInput.value = state.imageCaption;
+  const fileInput = document.getElementById('image-file-' + key);
+  if(fileInput) fileInput.value = '';
+  renderImageEditorPreview(key);
+}
+function getImageEditorData(key){
+  const config = imageEditorConfigs[key];
+  const state = imageEditorStates[key];
+  const imageInput = document.getElementById(config.imageInput);
+  const captionInput = document.getElementById(config.captionInput);
+  state.image = imageInput ? imageInput.value.trim() : state.image;
+  state.imageCaption = captionInput ? captionInput.value.trim() : state.imageCaption;
+  return {image:state.image,imageCaption:state.imageCaption,imageName:state.imageName,imageSize:state.imageSize,imageEffect:state.imageEffect,imagePosition:state.imagePosition,imageScale:state.imageScale,imageIntensity:state.imageIntensity,imageOverlay:state.imageOverlay,imageHover:state.imageHover,imageWatermark:state.imageWatermark,imageWatermarkOpacity:state.imageWatermarkOpacity,imageWatermarkPosition:state.imageWatermarkPosition};
+}
+function showImageEditorError(key,message){
+  const error = document.getElementById('image-error-' + key);
+  if(!error) return;
+  error.textContent = message;
+  error.classList.add('visible');
+}
+function encodeImageBase64(bytes){
+  let binary = '';
+  for(let offset=0;offset<bytes.length;offset+=0x8000) binary += String.fromCharCode(...bytes.subarray(offset,offset+0x8000));
+  return btoa(binary);
+}
+async function uploadEditorImage(key,input){
+  const file = input.files && input.files[0];
+  if(!file) return;
+  const extension = file.name.slice(file.name.lastIndexOf('.') + 1).toLowerCase();
+  const expectedMime = extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'png' ? 'image/png' : extension === 'webp' ? 'image/webp' : '';
+  const allowed = !!expectedMime && (!file.type || file.type.toLowerCase() === expectedMime);
+  if(!allowed){showImageEditorError(key,'Поддерживаются только JPG, JPEG, PNG и WebP.');input.value='';return;}
+  if(file.size > 10 * 1024 * 1024){showImageEditorError(key,'Размер изображения не должен превышать 10 MiB.');input.value='';return;}
+  if(!file.size){showImageEditorError(key,'Файл изображения пуст.');input.value='';return;}
+  const state = imageEditorStates[key];
+  const previousImage = state.image;
+  const button = document.querySelector('#' + imageEditorConfigs[key].container + ' .image-editor-actions button');
+  if(button) button.disabled = true;
+  showImageEditorError(key,'Загружаем изображение в GitHub…');
+  try{
+    const contentBase64 = encodeImageBase64(new Uint8Array(await file.arrayBuffer()));
+    const response = await fetch('/api/images/upload',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({category:imageEditorConfigs[key].category,fileName:file.name,contentType:expectedMime,contentBase64})
+    });
+    const result = await response.json();
+    if(!response.ok) throw new Error(result.error || 'Не удалось загрузить изображение');
+    if(previousImage && previousImage !== result.image) scheduleImageDeletion(key,previousImage);
+    if(!state.newUploads.includes(result.image) && result.image !== state.initialImage) state.newUploads.push(result.image);
+    state.image = result.image;
+    state.imageName = result.imageName || file.name;
+    state.imageSize = result.imageSize || file.size;
+    document.getElementById(imageEditorConfigs[key].imageInput).value = state.image;
+    state.pendingDeletePaths = state.pendingDeletePaths.filter(image=>image !== state.image);
+    const error = document.getElementById('image-error-' + key);
+    error.dataset.keepError = '';
+    error.textContent = '';
+    error.classList.remove('visible');
+    renderImageEditorPreview(key);
+  }catch(error){
+    showImageEditorError(key,error.message);
+  }finally{
+    if(button) button.disabled = false;
+    input.value = '';
+  }
+}
+function removeEditorImage(key){
+  const config = imageEditorConfigs[key];
+  const input = document.getElementById(config.imageInput);
+  const state = imageEditorStates[key];
+  if(state.image) scheduleImageDeletion(key,state.image);
+  state.image = '';
+  state.imageName = '';
+  state.imageSize = 0;
+  input.value = '';
+  renderImageEditorPreview(key);
+}
+async function deleteManagedImage(category,image){
+  const response = await fetch('/api/images/delete',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category,image})
+  });
+  const result = await response.json();
+  if(!response.ok) throw new Error(result.error || 'Не удалось удалить изображение');
+}
+async function finalizeImageEditorSave(key){
+  const state = imageEditorStates[key];
+  const paths = [...new Set([...state.pendingDeletePaths,...state.newUploads])].filter(image=>image !== state.image);
+  const errors = [];
+  for(const image of paths){
+    try{await deleteManagedImage(imageEditorConfigs[key].category,image);}catch(error){errors.push(error.message);}
+  }
+  state.pendingDeletePaths = [];
+  state.newUploads = [];
+  state.initialImage = state.image;
+  return errors;
+}
+async function cleanupUncommittedImageUploads(key){
+  const state = imageEditorStates[key];
+  const paths = [...new Set(state.newUploads)].filter(image=>image !== state.initialImage);
+  state.newUploads = [];
+  for(const image of paths){
+    if(image === state.initialImage) continue;
+    try{await deleteManagedImage(imageEditorConfigs[key].category,image);}catch{}
+  }
+}
+function openImageEffect(key){
+  activeImageEditor = key;
+  const state = imageEditorStates[key];
+  imageEffectDraft = {imageEffect:state.imageEffect,imagePosition:state.imagePosition,imageScale:state.imageScale,imageIntensity:state.imageIntensity,imageOverlay:state.imageOverlay,imageHover:state.imageHover,imageCaption:document.getElementById(imageEditorConfigs[key].captionInput).value,imageWatermark:state.imageWatermark,imageWatermarkOpacity:state.imageWatermarkOpacity,imageWatermarkPosition:state.imageWatermarkPosition};
+  imageHoverPreview = false;
+  document.getElementById('image-effect-select').value = imageEffectDraft.imageEffect;
+  document.getElementById('image-position-select').value = imageEffectDraft.imagePosition;
+  document.getElementById('image-scale-range').value = imageEffectDraft.imageScale;
+  document.getElementById('image-intensity-range').value = imageEffectDraft.imageIntensity;
+  document.getElementById('image-overlay-range').value = imageEffectDraft.imageOverlay;
+  document.getElementById('image-hover-select').value = imageEffectDraft.imageHover;
+  document.getElementById('image-watermark-toggle').checked = imageEffectDraft.imageWatermark;
+  document.getElementById('image-watermark-position').value = imageEffectDraft.imageWatermarkPosition;
+  document.getElementById('image-watermark-opacity').value = imageEffectDraft.imageWatermarkOpacity;
+  document.getElementById('image-effect-caption').value = imageEffectDraft.imageCaption;
+  document.getElementById('image-hover-toggle').classList.remove('active');
+  document.getElementById('image-hover-toggle').textContent = 'Показать hover';
+  document.getElementById('image-effect-overlay').hidden = false;
+  updateImageEffectDraft();
+}
+function updateImageEffectDraft(previewHover=false){
+  if(!imageEffectDraft) return;
+  imageEffectDraft.imageEffect = document.getElementById('image-effect-select').value;
+  imageEffectDraft.imagePosition = document.getElementById('image-position-select').value;
+  imageEffectDraft.imageScale = Number(document.getElementById('image-scale-range').value);
+  imageEffectDraft.imageIntensity = Number(document.getElementById('image-intensity-range').value);
+  imageEffectDraft.imageOverlay = Number(document.getElementById('image-overlay-range').value);
+  imageEffectDraft.imageHover = document.getElementById('image-hover-select').value;
+  imageEffectDraft.imageCaption = document.getElementById('image-effect-caption').value;
+  imageEffectDraft.imageWatermark = document.getElementById('image-watermark-toggle').checked;
+  imageEffectDraft.imageWatermarkPosition = document.getElementById('image-watermark-position').value;
+  imageEffectDraft.imageWatermarkOpacity = Number(document.getElementById('image-watermark-opacity').value);
+  if(previewHover){
+    imageHoverPreview = imageEffectDraft.imageHover !== 'none';
+    const hoverButton = document.getElementById('image-hover-toggle');
+    hoverButton.classList.toggle('active',imageHoverPreview);
+    hoverButton.textContent = imageHoverPreview ? 'Скрыть hover' : 'Показать hover';
+  }
+  document.getElementById('image-scale-value').textContent = imageEffectDraft.imageScale + '%';
+  document.getElementById('image-intensity-value').textContent = imageEffectDraft.imageIntensity + '%';
+  document.getElementById('image-overlay-value').textContent = imageEffectDraft.imageOverlay + '%';
+  document.getElementById('image-watermark-opacity-value').textContent = imageEffectDraft.imageWatermarkOpacity + '%';
+  renderImageEffectPreview();
+}
+function toggleImageHoverPreview(){
+  imageHoverPreview = !imageHoverPreview;
+  const button = document.getElementById('image-hover-toggle');
+  button.classList.toggle('active',imageHoverPreview);
+  button.textContent = imageHoverPreview ? 'Скрыть hover' : 'Показать hover';
+  renderImageEffectPreview();
+}
+function renderImageEffectPreview(){
+  if(!activeImageEditor || !imageEffectDraft) return;
+  const state = imageEditorStates[activeImageEditor];
+  const frame = document.getElementById('image-effect-preview-frame');
+  const image = document.getElementById('image-effect-preview-image');
+  const overlay = document.getElementById('image-effect-preview-overlay');
+  const watermark = document.getElementById('image-effect-watermark');
+  const empty = document.getElementById('image-effect-preview-empty');
+  const source = safeImageSource(state.image);
+  watermark.hidden = !imageEffectDraft.imageWatermark || !source;
+  watermark.dataset.position = imageEffectDraft.imageWatermarkPosition;
+  watermark.style.opacity = String(imageEffectDraft.imageWatermarkOpacity / 100);
+  if(!source){image.hidden=true;image.removeAttribute('src');empty.hidden=false;return;}
+  image.hidden=false;
+  empty.hidden=true;
+  if(image.src !== new URL(source,window.location.origin).href) image.src = source;
+  const positions = {center:'50% 50%',top:'50% 0%',bottom:'50% 100%',left:'0% 50%',right:'100% 50%'};
+  image.style.objectPosition = positions[imageEffectDraft.imagePosition] || '50% 50%';
+  const effect = imageEffectDraft.imageEffect;
+  const intensity = imageEffectDraft.imageIntensity / 100;
+  const overlayIntensity = imageEffectDraft.imageOverlay / 100;
+  let scale = imageEffectDraft.imageScale / 100 * (effect === 'scale' ? 1 + intensity * .25 : 1);
+  let opacity = effect === 'fade' ? .4 + intensity * .6 : 1;
+  let brightness = effect === 'darken' ? 1 - intensity * .65 : 1;
+  let shadow = effect === 'glow' ? '0 0 ' + (8 + intensity * 30) + 'px rgba(238,35,73,' + (.15 + intensity * .65) + ')' : 'none';
+  if(imageHoverPreview){
+    if(imageEffectDraft.imageHover === 'scale') scale *= 1.12;
+    if(imageEffectDraft.imageHover === 'glow') shadow = '0 0 ' + (18 + intensity * 35) + 'px rgba(238,35,73,' + (.35 + intensity * .6) + ')';
+  }
+  image.style.transform = 'scale(' + scale + ')';
+  image.style.opacity = String(opacity);
+  image.style.filter = 'brightness(' + brightness + ')';
+  image.style.boxShadow = shadow;
+  overlay.style.background = 'rgba(0,0,0,' + overlayIntensity + ')';
+  frame.dataset.hover = imageHoverPreview ? 'true' : 'false';
+}
+function closeImageEffect(save){
+  if(!activeImageEditor){document.getElementById('image-effect-overlay').hidden=true;return;}
+  if(save && imageEffectDraft){
+    const state = imageEditorStates[activeImageEditor];
+    Object.assign(state,imageEffectDraft);
+    document.getElementById(imageEditorConfigs[activeImageEditor].captionInput).value = state.imageCaption;
+    renderImageEditorPreview(activeImageEditor);
+  }
+  document.getElementById('image-effect-overlay').hidden = true;
+  activeImageEditor = '';
+  imageEffectDraft = null;
+  imageHoverPreview = false;
+}
 
 async function loadPoems(){
   setStorageStatus('checking');
@@ -1447,6 +2204,7 @@ function openPoemForm(){
   const now = new Date();
   document.getElementById('poem-date').value = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0,10);
   document.getElementById('poem-status').value = 'published';
+  initializeImageEditor('poems',null);
   document.getElementById('poem-delete').hidden = true;
   document.getElementById('poem-error').style.display = 'none';
   updatePoemCycleEditor();
@@ -1454,6 +2212,7 @@ function openPoemForm(){
   document.getElementById('poem-title').focus();
 }
 function closePoemForm(){
+  cleanupUncommittedImageUploads('poems');
   const form = document.getElementById('poem-form');
   form.reset();
   form.style.display = 'none';
@@ -1474,8 +2233,7 @@ function editPoem(poem){
   document.getElementById('poem-text').value = poem.text || '';
   document.getElementById('poem-date').value = poem.date || '';
   document.getElementById('poem-status').value = poem.status === 'draft' ? 'draft' : 'published';
-  document.getElementById('poem-image').value = poem.image || '';
-  document.getElementById('poem-caption').value = poem.caption || '';
+  initializeImageEditor('poems',poem);
   document.getElementById('poem-delete').hidden = false;
   document.getElementById('poem-error').style.display = 'none';
   updatePoemCycleEditor();
@@ -1627,6 +2385,7 @@ function openProseForm(){
   document.getElementById('prose-date').value = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0,10);
   document.getElementById('prose-type').value = 'story';
   document.getElementById('prose-status').value = 'published';
+  initializeImageEditor('prose',null);
   document.getElementById('prose-delete').hidden = true;
   clearProseError();
   form.style.display = 'block';
@@ -1637,6 +2396,7 @@ function startProse(){
   openProseForm();
 }
 function closeProseForm(){
+  cleanupUncommittedImageUploads('prose');
   const form = document.getElementById('prose-form');
   form.reset();
   form.style.display = 'none';
@@ -1656,8 +2416,7 @@ function editProse(entry){
   document.getElementById('prose-text').value = entry.text || '';
   document.getElementById('prose-date').value = entry.date || '';
   document.getElementById('prose-status').value = entry.status === 'draft' ? 'draft' : 'published';
-  document.getElementById('prose-image').value = entry.image || '';
-  document.getElementById('prose-image-caption').value = entry.imageCaption || '';
+  initializeImageEditor('prose',entry);
   document.getElementById('prose-delete').hidden = false;
   clearProseError();
   document.getElementById('prose-form').style.display = 'block';
@@ -1678,6 +2437,7 @@ function fillProsePreview(entry){
   image.onload = ()=>{figure.hidden = false;};
   if(source){
     image.src = source;
+    applySavedImageEffects(image,entry);
     caption.textContent = entry.imageCaption || '';
     caption.hidden = !entry.imageCaption;
     figure.hidden = false;
@@ -1695,8 +2455,7 @@ function previewProseForm(){
     text:document.getElementById('prose-text').value,
     date:document.getElementById('prose-date').value,
     status:document.getElementById('prose-status').value,
-    image:document.getElementById('prose-image').value.trim(),
-    imageCaption:document.getElementById('prose-image-caption').value.trim()
+    ...getImageEditorData('prose')
   });
 }
 function openProsePreview(entry){
@@ -1717,8 +2476,7 @@ async function saveProse(event){
     text:document.getElementById('prose-text').value.trim(),
     date:document.getElementById('prose-date').value,
     status:forcedStatus || document.getElementById('prose-status').value,
-    image:document.getElementById('prose-image').value.trim(),
-    imageCaption:document.getElementById('prose-image-caption').value.trim()
+    ...getImageEditorData('prose')
   };
   const payload = editingProseId ? {action:'update',id:editingProseId,prose:entry} : {action:'create',prose:entry};
   const buttons = form.querySelectorAll('[type="submit"]');
@@ -1737,7 +2495,9 @@ async function saveProse(event){
     document.getElementById('prose-count').textContent = String(proseEntries.length);
     setStorageStatus('online');
     renderProse();
+    const imageCleanupErrors = await finalizeImageEditorSave('prose');
     closeProseForm();
+    if(imageCleanupErrors.length) showProseError('Запись сохранена. Не удалось удалить старое изображение: ' + imageCleanupErrors.join('; '));
   }catch(error){
     setStorageStatus('offline');
     showProseError(error.message);
@@ -1792,6 +2552,31 @@ function safeImageSource(value){
     return '';
   }
 }
+function applySavedImageEffects(image,record){
+  const effect = ['none','fade','darken','scale','zoom','glow'].includes(record.imageEffect) ? (record.imageEffect === 'zoom' ? 'scale' : record.imageEffect) : 'none';
+  const position = ['center','top','bottom','left','right'].includes(record.imagePosition) ? record.imagePosition : 'center';
+  const hover = ['none','scale','zoom','glow'].includes(record.imageHover) ? (record.imageHover === 'zoom' ? 'scale' : record.imageHover) : 'none';
+  const baseScale = Number.isFinite(Number(record.imageScale)) ? Number(record.imageScale) : 100;
+  const intensity = (Number.isFinite(Number(record.imageIntensity)) ? Number(record.imageIntensity) : 50) / 100;
+  const overlay = (Number.isFinite(Number(record.imageOverlay)) ? Number(record.imageOverlay) : 0) / 100;
+  const positions = {center:'50% 50%',top:'50% 0%',bottom:'50% 100%',left:'0% 50%',right:'100% 50%'};
+  image.style.objectPosition = positions[position];
+  image.style.opacity = effect === 'fade' ? String(.4 + intensity * .6) : '1';
+  const darken = effect === 'darken' ? intensity * .65 : 0;
+  image.style.filter = 'brightness(' + Math.max(0,1 - darken - overlay * .65) + ')';
+  const scale = baseScale / 100 * (effect === 'scale' ? 1 + intensity * .25 : 1);
+  image.style.transform = 'scale(' + scale + ')';
+  image.style.boxShadow = effect === 'glow' ? '0 0 ' + (8 + intensity * 30) + 'px rgba(238,35,73,' + (.15 + intensity * .65) + ')' : 'none';
+  image.style.transition = 'opacity .35s,transform .35s,filter .35s,box-shadow .35s';
+  image.onmouseenter = ()=>{
+    if(hover === 'scale') image.style.transform = 'scale(' + (scale * 1.1) + ')';
+    if(hover === 'glow') image.style.boxShadow = '0 0 28px rgba(238,35,73,.72)';
+  };
+  image.onmouseleave = ()=>{
+    image.style.transform = 'scale(' + scale + ')';
+    image.style.boxShadow = effect === 'glow' ? '0 0 ' + (8 + intensity * 30) + 'px rgba(238,35,73,' + (.15 + intensity * .65) + ')' : 'none';
+  };
+}
 function fillPoemPreview(poem){
   document.getElementById('preview-title').textContent = poem.title || 'Без названия';
   document.getElementById('preview-date').textContent = formatPoemDate(poem.date);
@@ -1804,6 +2589,7 @@ function fillPoemPreview(poem){
   image.onload = ()=>{figure.hidden = false;};
   if(source){
     image.src = source;
+    applySavedImageEffects(image,poem);
     figure.hidden = false;
     document.getElementById('preview-caption').textContent = poem.caption || '';
     document.getElementById('preview-caption').hidden = !poem.caption;
@@ -1827,7 +2613,8 @@ function previewPoemForm(){
     date:document.getElementById('poem-date').value,
     status:document.getElementById('poem-status').value,
     image:document.getElementById('poem-image').value,
-    caption:document.getElementById('poem-caption').value.trim()
+    caption:document.getElementById('poem-caption').value.trim(),
+    ...getImageEditorData('poems')
   });
 }
 function openPoemPreview(poem){
@@ -1849,7 +2636,7 @@ async function savePoem(event){
     text,
     date:document.getElementById('poem-date').value,
     status:forcedStatus || document.getElementById('poem-status').value,
-    image:document.getElementById('poem-image').value.trim(),
+    ...getImageEditorData('poems'),
     caption:document.getElementById('poem-caption').value.trim()
   };
   const payload = editingPoemId
@@ -1869,8 +2656,10 @@ async function savePoem(event){
     poemsLoaded = true;
     setStorageStatus('online');
     renderPoems();
+    const imageCleanupErrors = await finalizeImageEditorSave('poems');
     closePoemForm();
-    document.getElementById('poem-error').style.display = 'none';
+    if(imageCleanupErrors.length) showPoemError('Стихотворение сохранено. Не удалось удалить старое изображение: ' + imageCleanupErrors.join('; '));
+    else document.getElementById('poem-error').style.display = 'none';
   }catch(error){
     setStorageStatus('offline');
     showPoemError(error.message);
@@ -2103,6 +2892,7 @@ async function openCycleForm(){
   document.getElementById('cycle-id').value = '';
   document.getElementById('cycle-form-heading').textContent = 'Новый цикл';
   document.getElementById('cycle-status').value = 'draft';
+  initializeImageEditor('cycles',null);
   document.getElementById('cycle-delete').hidden = true;
   clearCycleError();
   renderCyclePoemPicker();
@@ -2111,6 +2901,7 @@ async function openCycleForm(){
   document.getElementById('cycle-title').focus();
 }
 function closeCycleForm(){
+  cleanupUncommittedImageUploads('cycles');
   const form = document.getElementById('cycle-form');
   form.reset();
   form.style.display = 'none';
@@ -2130,7 +2921,7 @@ function editCycle(cycle){
   document.getElementById('cycle-title').value = cycle.title || '';
   document.getElementById('cycle-description').value = cycle.description || '';
   document.getElementById('cycle-status').value = cycle.status === 'published' ? 'published' : 'draft';
-  document.getElementById('cycle-cover').value = cycle.cover || '';
+  initializeImageEditor('cycles',cycle);
   document.getElementById('cycle-delete').hidden = false;
   clearCycleError();
   renderCyclePoemPicker();
@@ -2238,6 +3029,7 @@ async function saveCycle(event){
     title:document.getElementById('cycle-title').value.trim(),
     description:document.getElementById('cycle-description').value.trim(),
     status:document.getElementById('cycle-status').value,
+    ...getImageEditorData('cycles'),
     cover:document.getElementById('cycle-cover').value.trim(),
     poemIds:[...editingCyclePoemIds]
   };
@@ -2259,8 +3051,10 @@ async function saveCycle(event){
     renderCycles();
     renderPoems();
     updatePoemCycleEditor();
+    const imageCleanupErrors = await finalizeImageEditorSave('cycles');
     closeCycleForm();
     clearCycleError();
+    if(imageCleanupErrors.length) showCycleError('Цикл сохранён. Не удалось удалить старое изображение: ' + imageCleanupErrors.join('; '));
   }catch(error){
     showCycleError(error.message);
   }finally{
@@ -2375,6 +3169,7 @@ function fillCyclePreview(cycle){
   cover.onerror = ()=>{cover.hidden = true;};
   if(source){
     cover.src = source;
+    applySavedImageEffects(cover,cycle);
     cover.hidden = false;
   }else{
     cover.removeAttribute('src');
@@ -2416,6 +3211,7 @@ function previewCycleForm(){
     title,
     description:document.getElementById('cycle-description').value.trim(),
     status:document.getElementById('cycle-status').value,
+    ...getImageEditorData('cycles'),
     cover:document.getElementById('cycle-cover').value.trim(),
     poemIds:[...editingCyclePoemIds]
   });
@@ -2493,6 +3289,18 @@ function show(id,button){
   if(id === 'prose') loadProse();
 }
 
+mountAllImageEditors();
+document.querySelectorAll('.preview-figure img, #image-effect-preview-image').forEach(image=>{image.draggable=false;});
+document.addEventListener('contextmenu',event=>{
+  if(event.target instanceof HTMLImageElement && (event.target.closest('.image-editor-preview') || event.target.id === 'image-effect-preview-image' || event.target.closest('.preview-figure'))){
+    event.preventDefault();
+  }
+});
+document.addEventListener('dragstart',event=>{
+  if(event.target instanceof HTMLImageElement && (event.target.closest('.image-editor-preview') || event.target.id === 'image-effect-preview-image' || event.target.closest('.preview-figure'))){
+    event.preventDefault();
+  }
+});
 restoreSession();
 </script>
 </body>
@@ -2915,6 +3723,140 @@ const server = http.createServer((req, res) => {
         }
 
         sendJson(res,400,{error:'Неизвестное действие с произведением'});
+      }).catch(error=>{
+        if(!res.headersSent){
+          const status = error.message === 'Request body is too large' ? 413 : 400;
+          sendJson(res,status,{error:status === 413 ? 'Запрос слишком большой' : 'Не удалось прочитать запрос'});
+        }
+      });
+    }).catch(()=>sendJson(res,401,{error:'Требуется вход'}));
+    return;
+  }
+
+  const publicImageRecordMatch = req.url.match(/^\/api\/public-image\/(poem|prose|cycle)\/([^/?#]+)$/);
+  if(publicImageRecordMatch && req.method === 'GET'){
+    let recordId;
+    try{recordId = decodeURIComponent(publicImageRecordMatch[2]);}catch{sendJson(res,400,{error:'Некорректный ID записи'});return;}
+    if(!recordId || Buffer.byteLength(recordId,'utf8') > 300){sendJson(res,400,{error:'Некорректный ID записи'});return;}
+    getPublishedRecordImage(publicImageRecordMatch[1],recordId).then(async result=>{
+      if(!result){sendJson(res,404,{error:'Опубликованное изображение не найдено'});return;}
+      await sendPublicImage(res,result.info,result.settings);
+    }).catch(error=>{
+      if(error.code === 'GITHUB_TOKEN_MISSING') sendJson(res,503,{error:'Хранилище изображений не настроено'});
+      else{
+        if(error.status) console.error(`Public image lookup failed with status ${error.status}`);
+        else console.error('Public image lookup failed');
+        sendJson(res,502,{error:'Не удалось загрузить изображение'});
+      }
+    });
+    return;
+  }
+
+  const managedImageMatch = req.url.match(/^\/images\/(poems|prose|cycles)\/([a-f0-9]{64})\.(jpe?g|png|webp)$/i);
+  if(managedImageMatch && req.method === 'GET'){
+    getSession(req).then(async session=>{
+      try{
+        const info = getManagedImageInfo(req.url,managedImageMatch[1]);
+        if(!info){sendJson(res,404,{error:'Изображение не найдено'});return;}
+        let watermarkSettings = null;
+        if(!session){
+          let references;
+          try{references = await getPublishedImageReferences(info.category,req.url);}catch(error){
+            if(error.code === 'GITHUB_TOKEN_MISSING') sendJson(res,503,{error:'Хранилище изображений не настроено'});
+            else sendJson(res,502,{error:'Не удалось проверить доступ к изображению'});
+            return;
+          }
+          if(!references.length){sendJson(res,404,{error:'Изображение не найдено'});return;}
+          watermarkSettings = references[0].settings;
+          if(references.some(reference=>JSON.stringify(reference.settings) !== JSON.stringify(watermarkSettings))){
+            sendJson(res,409,{error:'У изображения несколько вариантов watermark. Используйте контекстный маршрут записи.'});
+            return;
+          }
+        }
+        const imageFile = info && await readGitHubImage(info.filePath);
+        if(!imageFile){
+          sendJson(res,404,{error:'Изображение не найдено'});
+          return;
+        }
+        const publicImage = session ? {bytes:imageFile.bytes,contentType:info.extension === 'jpg' || info.extension === 'jpeg' ? 'image/jpeg' : `image/${info.extension}`} : renderPublicWatermarkedImage(imageFile.bytes,info.extension,watermarkSettings);
+        res.writeHead(200,{
+          'Content-Type':publicImage.contentType,
+          'Content-Length':publicImage.bytes.length,
+          'Cache-Control':session ? 'private, no-store' : 'public, max-age=300',
+          'Content-Disposition':'inline',
+          'Referrer-Policy':'no-referrer',
+          'X-Content-Type-Options':'nosniff'
+        });
+        res.end(publicImage.bytes);
+      }catch(error){
+        if(error.code === 'GITHUB_TOKEN_MISSING') sendJson(res,503,{error:'Хранилище изображений не настроено'});
+        else{
+          if(error.status) console.error(`GitHub image read failed with status ${error.status}`);
+          else console.error('GitHub image read failed');
+          sendJson(res,502,{error:'Не удалось загрузить изображение'});
+        }
+      }
+    }).catch(()=>sendJson(res,401,{error:'Требуется вход'}));
+    return;
+  }
+
+  if(req.url === '/api/images/upload' && req.method === 'POST'){
+    if(!isSameOrigin(req)){
+      sendJson(res,403,{error:'Запрос отклонён'});
+      return;
+    }
+    getSession(req).then(session=>{
+      if(!session){
+        sendJson(res,401,{error:'Требуется вход'});
+        return;
+      }
+      const uploadBodyLimit = Math.ceil(MAX_IMAGE_SIZE_BYTES / 3) * 4 + 64 * 1024;
+      readRequestBody(req,uploadBodyLimit).then(body=>{
+        let payload;
+        try{payload = JSON.parse(body);}catch{
+          sendJson(res,400,{error:'Некорректный JSON'});
+          return;
+        }
+        if(!payload || typeof payload !== 'object' || Array.isArray(payload)){
+          sendJson(res,400,{error:'Ожидались данные изображения'});
+          return;
+        }
+        queueImageMutation(()=>uploadImageToGitHub(payload.category,payload.fileName,payload.contentType,payload.contentBase64)).then(result=>{
+          sendJson(res,201,result);
+        }).catch(error=>sendImageMutationError(res,error));
+      }).catch(error=>{
+        if(!res.headersSent){
+          const tooLarge = error.message === 'Request body is too large';
+          sendJson(res,tooLarge ? 413 : 400,{error:tooLarge ? 'Размер запроса превышает допустимые 10 MiB' : 'Не удалось прочитать запрос'});
+        }
+      });
+    }).catch(()=>sendJson(res,401,{error:'Требуется вход'}));
+    return;
+  }
+
+  if(req.url === '/api/images/delete' && req.method === 'POST'){
+    if(!isSameOrigin(req)){
+      sendJson(res,403,{error:'Запрос отклонён'});
+      return;
+    }
+    getSession(req).then(session=>{
+      if(!session){
+        sendJson(res,401,{error:'Требуется вход'});
+        return;
+      }
+      readRequestBody(req).then(body=>{
+        let payload;
+        try{payload = JSON.parse(body);}catch{
+          sendJson(res,400,{error:'Некорректный JSON'});
+          return;
+        }
+        if(!payload || typeof payload !== 'object' || Array.isArray(payload)){
+          sendJson(res,400,{error:'Ожидались данные изображения'});
+          return;
+        }
+        queueImageMutation(()=>deleteImageFromGitHub(payload.category,payload.image)).then(result=>{
+          sendJson(res,200,result);
+        }).catch(error=>sendImageMutationError(res,error));
       }).catch(error=>{
         if(!res.headersSent){
           const status = error.message === 'Request body is too large' ? 413 : 400;
