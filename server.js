@@ -253,8 +253,10 @@ function getImageDimensions(bytes,extension){
 }
 
 function renderPublicWatermarkedImage(bytes,extension,settings){
-  if(!settings.imageWatermark) return {bytes,contentType:extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : `image/${extension}`};
   const {width,height} = getImageDimensions(bytes,extension);
+  const watermarkOn = settings.imageWatermark;
+  const archiveOn = settings.imageEffect === 'archive' && settings.imageArchiveMarkup;
+  if(!watermarkOn && !archiveOn) return {bytes,contentType:extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : `image/${extension}`};
   const opacity = Math.max(0,Math.min(100,settings.imageWatermarkOpacity)) / 100;
   const margin = Math.max(12,Math.round(Math.min(width,height) * .035));
   const fontSize = Math.max(18,Math.min(72,Math.round(Math.min(width,height) * .055)));
@@ -267,7 +269,20 @@ function renderPublicWatermarkedImage(bytes,extension,settings){
   };
   const position = positions[settings.imageWatermarkPosition] || positions['bottom-right'];
   const mime = extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : `image/${extension}`;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><image x="0" y="0" width="${width}" height="${height}" preserveAspectRatio="none" href="data:${mime};base64,${bytes.toString('base64')}"/><text x="${position.x}" y="${position.y}" text-anchor="${position.anchor}" fill="#fff" fill-opacity="${opacity}" stroke="#000" stroke-opacity="${Math.min(.72,opacity)}" stroke-width="${Math.max(1,Math.round(fontSize * .07))}" paint-order="stroke" font-family="Georgia, 'Times New Roman', serif" font-size="${fontSize}" font-weight="700">© Ринна</text></svg>`;
+  const escapeXml = value=>String(value || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+  let archiveMarkup = '';
+  if(archiveOn){
+    const label = escapeXml(settings.visualRecordLabel || '');
+    const corner = escapeXml(settings.imageCornerLabel || '');
+    const parts = [settings.imageMetaPrefix,settings.imageMetaSection,settings.imageMetaTitle].map(value=>typeof value === 'string' ? value.trim() : '').filter(Boolean);
+    const meta = parts.length ? `// ${escapeXml(parts.join(' // '))} //` : '';
+    const metaWidth = Math.max(80,width - margin * 2 - 26);
+    const footer = meta ? `<path d="M ${margin} ${height - margin - fontSize * .85} v ${fontSize * .85}" stroke="#ee2349" stroke-width="2"/><text x="${margin + 14}" y="${height - margin}" fill="#f4e8eb" font-family="Arial,sans-serif" font-size="${Math.max(10,Math.min(15,Math.round(fontSize * .28)))}" letter-spacing="1.2" textLength="${Math.min(metaWidth,Math.max(1,meta.length * fontSize * .17))}" lengthAdjust="spacingAndGlyphs">${meta}</text>` : '';
+    archiveMarkup = `<defs><pattern id="archiveGrid" width="48" height="48" patternUnits="userSpaceOnUse"><path d="M 48 0 L 0 0 0 48" fill="none" stroke="#fff" stroke-opacity=".075" stroke-width=".7"/><path d="M 24 0 V 48 M 0 24 H 48" fill="none" stroke="#ee2349" stroke-opacity=".035" stroke-width=".6"/></pattern></defs><rect width="${width}" height="${height}" fill="url(#archiveGrid)"/><rect x="1" y="1" width="${width - 2}" height="${height - 2}" fill="none" stroke="#92283d" stroke-opacity=".9" stroke-width="2"/><path d="M ${margin} ${margin} h ${Math.max(18,Math.round(fontSize * .65))} M ${margin} ${margin} v ${Math.max(18,Math.round(fontSize * .65))} M ${width - margin} ${height - margin} h -${Math.max(18,Math.round(fontSize * .65))} M ${width - margin} ${height - margin} v -${Math.max(18,Math.round(fontSize * .65))}" fill="none" stroke="#ee2349" stroke-opacity=".65" stroke-width="1"/>${label ? `<text x="${margin}" y="${margin + fontSize}" fill="#f7e9ec" font-family="Arial,sans-serif" font-size="${Math.max(10,Math.min(18,Math.round(fontSize * .32)))}" font-weight="700" letter-spacing="2">${label}</text>` : ''}${corner ? `<text x="${width - margin}" y="${margin + fontSize}" text-anchor="end" fill="#f07a8e" font-family="Arial,sans-serif" font-size="${Math.max(10,Math.min(17,Math.round(fontSize * .3)))}" font-weight="700" letter-spacing="1.4">${corner}</text>` : ''}${footer}`;
+  }
+  const imageFilter = settings.imageEffect === 'archive' ? `brightness(${Math.max(0,.88 * (1 - settings.imageOverlay / 100 * .65))})` : settings.imageEffect === 'darken' ? `brightness(${Math.max(0,1 - settings.imageIntensity / 100 * .65)})` : 'none';
+  const watermark = watermarkOn ? `<text x="${position.x}" y="${position.y}" text-anchor="${position.anchor}" fill="#fff" fill-opacity="${opacity}" stroke="#000" stroke-opacity="${Math.min(.72,opacity)}" stroke-width="${Math.max(1,Math.round(fontSize * .07))}" paint-order="stroke" font-family="Georgia, 'Times New Roman', serif" font-size="${fontSize}" font-weight="700">© Ринна</text>` : '';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="user-select:none;-webkit-user-select:none"><image x="0" y="0" width="${width}" height="${height}" preserveAspectRatio="none" href="data:${mime};base64,${bytes.toString('base64')}" style="filter:${imageFilter}"/>${archiveMarkup}${watermark}</svg>`;
   return {bytes:Buffer.from(svg,'utf8'),contentType:'image/svg+xml; charset=utf-8'};
 }
 
@@ -374,7 +389,8 @@ async function getPublishedImageReferences(category,imagePath){
       for(const [pathValue,record,id] of entries){
         if(typeof pathValue !== 'string' || !pathValue) continue;
         if(!cached.settings.has(pathValue)) cached.settings.set(pathValue,[]);
-        cached.settings.get(pathValue).push({id,settings:getImageWatermarkSettings(record)});
+        const contentKind = category === 'poems' ? 'poem' : category === 'cycles' ? 'cycle' : 'prose';
+        cached.settings.get(pathValue).push({id,settings:getImagePresentationSettings(record,contentKind)});
       }
       cached.expiresAt = Date.now() + 30_000;
       return cached.settings;
@@ -411,7 +427,7 @@ async function getPublishedRecordImage(type,id){
   const imagePath = typeof record.image === 'string' && record.image ? record.image : (category === 'cycles' && typeof record.cover === 'string' ? record.cover : '');
   const info = getManagedImageInfo(imagePath,category);
   if(!info) return null;
-  return {info,settings:getImageWatermarkSettings(record)};
+  return {info,settings:getImagePresentationSettings(record,category === 'poems' ? 'poem' : category === 'cycles' ? 'cycle' : 'prose')};
 }
 
 async function sendPublicImage(res,info,settings){
@@ -539,10 +555,42 @@ function queuePoemMutation(mutate, message){
 
 const DEFAULT_IMAGE_SETTINGS = Object.freeze({imageEffect:'none',imagePosition:'center',imageScale:100,imageIntensity:50,imageOverlay:0,imageHover:'none'});
 const DEFAULT_IMAGE_WATERMARK_SETTINGS = Object.freeze({imageWatermark:true,imageWatermarkOpacity:42,imageWatermarkPosition:'bottom-right'});
-const IMAGE_EFFECTS = new Set(['none','fade','darken','scale','zoom','glow']);
+const DEFAULT_IMAGE_ARCHIVE_SETTINGS = Object.freeze({imageArchiveMarkup:true,visualRecordLabel:'',imageMetaPrefix:'ИЛЛЮСТРАЦИЯ',imageMetaSection:'',imageMetaTitle:'',imageCornerLabel:''});
+const IMAGE_EFFECTS = new Set(['none','fade','darken','scale','zoom','glow','archive']);
 const IMAGE_POSITIONS = new Set(['center','top','bottom','left','right']);
 const IMAGE_HOVER_EFFECTS = new Set(['none','scale','zoom','glow']);
 const IMAGE_WATERMARK_POSITIONS = new Set(['top-left','top-right','center','bottom-left','bottom-right']);
+
+function defaultVisualRecordLabel(contentKind){
+  if(contentKind === 'poem') return 'POEM // VISUAL RECORD';
+  if(contentKind === 'cycle') return 'CYCLE // VISUAL RECORD';
+  return 'CHAPTER // VISUAL RECORD';
+}
+
+function getImageArchiveSettings(input={},contentKind='poem',isNew=false){
+  const record = input && typeof input === 'object' ? input : {};
+  const defaultSection = isNew ? (contentKind === 'poem' ? 'СТИХОТВОРЕНИЕ' : contentKind === 'cycle' ? 'ЦИКЛ' : '') : '';
+  return {
+    imageArchiveMarkup:typeof record.imageArchiveMarkup === 'boolean' ? record.imageArchiveMarkup : DEFAULT_IMAGE_ARCHIVE_SETTINGS.imageArchiveMarkup,
+    visualRecordLabel:typeof record.visualRecordLabel === 'string' ? record.visualRecordLabel.trim().slice(0,160) : defaultVisualRecordLabel(contentKind),
+    imageMetaPrefix:typeof record.imageMetaPrefix === 'string' ? record.imageMetaPrefix.trim().slice(0,80) : DEFAULT_IMAGE_ARCHIVE_SETTINGS.imageMetaPrefix,
+    imageMetaSection:typeof record.imageMetaSection === 'string' ? record.imageMetaSection.trim().slice(0,120) : defaultSection,
+    imageMetaTitle:typeof record.imageMetaTitle === 'string' ? record.imageMetaTitle.trim().slice(0,160) : '',
+    imageCornerLabel:typeof record.imageCornerLabel === 'string' ? record.imageCornerLabel.trim().slice(0,100) : ''
+  };
+}
+
+function getImagePresentationSettings(input={},contentKind='poem'){
+  const record = input && typeof input === 'object' ? input : {};
+  const effect = record.imageEffect === 'zoom' ? 'scale' : record.imageEffect;
+  return {
+    ...getImageWatermarkSettings(record),
+    imageEffect:IMAGE_EFFECTS.has(effect) ? effect : DEFAULT_IMAGE_SETTINGS.imageEffect,
+    imageIntensity:Number.isInteger(Number(record.imageIntensity)) && Number(record.imageIntensity) >= 0 && Number(record.imageIntensity) <= 100 ? Number(record.imageIntensity) : DEFAULT_IMAGE_SETTINGS.imageIntensity,
+    imageOverlay:Number.isInteger(Number(record.imageOverlay)) && Number(record.imageOverlay) >= 0 && Number(record.imageOverlay) <= 100 ? Number(record.imageOverlay) : DEFAULT_IMAGE_SETTINGS.imageOverlay,
+    ...getImageArchiveSettings(record,contentKind,false)
+  };
+}
 
 function getImageWatermarkSettings(record={}){
   const input = record && typeof record === 'object' ? record : {};
@@ -553,10 +601,14 @@ function getImageWatermarkSettings(record={}){
   };
 }
 
-function validateImageSettings(input){
+function validateImageSettings(input,contentKind='poem'){
   if(input.imageWatermark !== undefined && typeof input.imageWatermark !== 'boolean') return {error:'Настройка watermark должна быть включена или выключена'};
   if(input.imageWatermarkOpacity !== undefined && (!Number.isInteger(input.imageWatermarkOpacity) || input.imageWatermarkOpacity < 0 || input.imageWatermarkOpacity > 100)) return {error:'Прозрачность watermark должна быть от 0 до 100%'};
   if(input.imageWatermarkPosition !== undefined && !IMAGE_WATERMARK_POSITIONS.has(input.imageWatermarkPosition)) return {error:'Неизвестная позиция watermark'};
+  if(input.imageArchiveMarkup !== undefined && typeof input.imageArchiveMarkup !== 'boolean') return {error:'Настройка архивной разметки должна быть включена или выключена'};
+  for(const field of ['visualRecordLabel','imageMetaPrefix','imageMetaSection','imageMetaTitle','imageCornerLabel']) if(input[field] !== undefined && typeof input[field] !== 'string') return {error:'Технические метки должны быть текстом'};
+  const fieldLimits = {visualRecordLabel:160,imageMetaPrefix:80,imageMetaSection:120,imageMetaTitle:160,imageCornerLabel:100};
+  for(const [field,limit] of Object.entries(fieldLimits)) if(typeof input[field] === 'string' && input[field].trim().length > limit) return {error:'Техническая метка слишком длинная'};
   const settings = {
     imageEffect:input.imageEffect === undefined ? DEFAULT_IMAGE_SETTINGS.imageEffect : (input.imageEffect === 'zoom' ? 'scale' : input.imageEffect),
     imagePosition:input.imagePosition === undefined ? DEFAULT_IMAGE_SETTINGS.imagePosition : input.imagePosition,
@@ -564,7 +616,8 @@ function validateImageSettings(input){
     imageIntensity:input.imageIntensity === undefined ? DEFAULT_IMAGE_SETTINGS.imageIntensity : Number(input.imageIntensity),
     imageOverlay:input.imageOverlay === undefined ? DEFAULT_IMAGE_SETTINGS.imageOverlay : Number(input.imageOverlay),
     imageHover:input.imageHover === undefined ? DEFAULT_IMAGE_SETTINGS.imageHover : (input.imageHover === 'zoom' ? 'scale' : input.imageHover),
-    ...getImageWatermarkSettings(input)
+    ...getImageWatermarkSettings(input),
+    ...getImageArchiveSettings(input,contentKind,false)
   };
   if(!IMAGE_EFFECTS.has(settings.imageEffect) || !IMAGE_POSITIONS.has(settings.imagePosition) || !IMAGE_HOVER_EFFECTS.has(settings.imageHover)) return {error:'Неизвестный эффект или позиция изображения'};
   if(!Number.isInteger(settings.imageScale) || settings.imageScale < 80 || settings.imageScale > 150) return {error:'Масштаб изображения должен быть от 80 до 150%'};
@@ -589,7 +642,7 @@ function validatePoem(input){
   const image = typeof input.image === 'string' ? input.image.trim() : '';
   const captionValue = typeof input.imageCaption === 'string' ? input.imageCaption : input.caption;
   const caption = typeof captionValue === 'string' ? captionValue.trim() : '';
-  const imageSettings = validateImageSettings(input);
+  const imageSettings = validateImageSettings(input,'poem');
   const imageMetadata = validateImageMetadata(input);
 
   if(!title || !text) return {error:'Название и текст обязательны'};
@@ -762,7 +815,7 @@ function validateProse(input){
   const date = typeof input.date === 'string' ? input.date.trim() : '';
   const image = typeof input.image === 'string' ? input.image.trim() : '';
   const imageCaption = typeof input.imageCaption === 'string' ? input.imageCaption.trim() : '';
-  const imageSettings = validateImageSettings(input);
+  const imageSettings = validateImageSettings(input,type === 'chapter' ? 'chapter' : 'prose');
   const imageMetadata = validateImageMetadata(input);
 
   if(!title) return {error:'Название произведения обязательно'};
@@ -924,7 +977,7 @@ function validateCycle(input, existingPoemIds){
   const cover = typeof imageValue === 'string' ? imageValue.trim() : '';
   const imageCaption = typeof input.imageCaption === 'string' ? input.imageCaption.trim() : '';
   const poemIds = input.poemIds;
-  const imageSettings = validateImageSettings(input);
+  const imageSettings = validateImageSettings(input,'cycle');
   const imageMetadata = validateImageMetadata(input);
 
   if(!title) return {error:'Название цикла обязательно'};
@@ -1285,10 +1338,30 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .preview-poem:before{content:"";position:absolute;top:28px;left:0;width:28px;height:1px;background:var(--accent)}
 .preview-index{color:#ac4057;font-size:9px;font-weight:700;letter-spacing:.2em}
 .preview-date{margin-top:24px;color:#a78e94;font-size:11px;letter-spacing:.12em;text-transform:uppercase}
-.preview-poem h2{margin:12px 0 27px;color:#fff1f3;font:700 clamp(30px,5vw,48px)/1.12 Georgia,"Times New Roman",serif}
+.preview-poem h2{overflow-wrap:anywhere;margin:12px 0 27px;color:#fff1f3;font:700 clamp(30px,5vw,48px)/1.12 Georgia,"Times New Roman",serif}
 .preview-body{color:#e3d5d9;font:18px/1.9 Georgia,"Times New Roman",serif;white-space:pre-wrap}
-.preview-figure{margin:36px 0 0}
-.preview-figure img{display:block;max-width:100%;max-height:440px;margin:0 auto;object-fit:contain}
+.preview-figure{position:relative;display:block;clear:both;box-sizing:border-box;width:100%;max-width:700px;overflow:hidden;isolation:isolate;margin:36px 0 0;background:#0b0709}
+.illustration-frame{position:relative;display:block;box-sizing:border-box;width:100%;max-height:440px;overflow:hidden;isolation:isolate;border:1px solid transparent;background:#0b0709}
+.illustration-frame>img{position:relative;z-index:0;display:block;width:100%;height:auto;max-height:440px;margin:0 auto;object-fit:contain}
+.illustration-frame.archive-frame{border-color:#762038;box-shadow:inset 0 0 0 1px #ed29401c}
+.archive-overlay{position:absolute;z-index:2;inset:0;overflow:hidden;pointer-events:none;color:#f5eff0;font:700 9px/1.35 Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase;user-select:none;-webkit-user-select:none}
+.archive-overlay[hidden]{display:none}
+.archive-grid{position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent 0 5px,#fff1 5px 6px),repeating-linear-gradient(90deg,transparent 0 44px,#ee234912 44px 45px),linear-gradient(90deg,transparent 8%,#ee23491c 8.1%,transparent 8.2%,transparent 91%,#ee23491c 91.1%,transparent 91.2%)}
+.archive-outline{position:absolute;inset:7px;border:1px solid #a72b441c}
+.archive-outline:before,.archive-outline:after{position:absolute;content:"";width:22px;height:22px;border-color:#ec3150;border-style:solid;opacity:.72}
+.archive-outline:before{top:-1px;left:-1px;border-width:1px 0 0 1px}
+.archive-outline:after{right:-1px;bottom:-1px;border-width:0 1px 1px 0}
+.archive-visual-label,.archive-corner-label{position:absolute;top:13px;max-width:44%;overflow:hidden;padding:5px 7px;background:#10080bc9;text-overflow:ellipsis;white-space:nowrap}
+.archive-visual-label{left:13px;border-left:1px solid #ee2349}
+.archive-corner-label{right:13px;color:#ef8191;text-align:right}
+.archive-corner-label[hidden]{display:none}
+.archive-meta{position:absolute;right:13px;bottom:13px;left:13px;max-height:3.1em;overflow:hidden;padding:4px 8px 4px 11px;border-left:1px solid #ee2349;background:linear-gradient(90deg,#10080bd9,#10080b88 80%,transparent);color:#eee0e3;font-size:8px;line-height:1.55;letter-spacing:.1em;white-space:normal}
+.archive-meta[hidden]{display:none}
+.preview-figure figcaption,.cycle-preview-figure figcaption{position:relative;margin:0;padding:10px 12px;border-top:1px solid #3c1720;color:#a58a91;text-align:center;font:italic 13px Georgia,"Times New Roman",serif}
+.cycle-preview-figure{position:relative;display:block;clear:both;width:100%;max-width:760px;overflow:hidden;margin:0 auto 30px;isolation:isolate;background:#0b0709}
+.cycle-preview-content h2{overflow-wrap:anywhere}
+.cycle-preview-figure .illustration-frame{max-height:300px}
+.cycle-preview-figure .illustration-frame>img{max-height:300px}
 .preview-figure figcaption{margin-top:10px;color:#a58a91;text-align:center;font:italic 13px Georgia,"Times New Roman",serif}
 .preview-status{margin-top:26px;color:#a83b53;font-size:9px;font-weight:700;letter-spacing:.2em;text-transform:uppercase}
 .image-editor{padding:15px;border:1px solid #421722;background:linear-gradient(145deg,#170b10,#10080b)}
@@ -1328,6 +1401,11 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .image-hover-toggle:after{content:""}
 .image-hover-toggle.active{border-color:#bf3150;background:#35101b;color:#fff}
 .image-effect-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px;margin-top:8px}
+.image-effect-controls .archive-settings-heading,.image-effect-controls .archive-live-preview-label,.image-effect-controls .archive-preview-frame{grid-column:1/-1}
+.archive-settings-heading{margin-top:15px;padding-top:14px;border-top:1px solid #602033}
+.archive-live-preview-label{margin-top:10px}
+.archive-preview-frame{width:100%;height:300px}
+.archive-preview-frame>img{object-fit:contain}
 .image-effect-controls select{width:100%;padding:12px;background:#0b0709;color:#f5eff0;border:1px solid #51202a;border-radius:2px}
 .image-effect-controls select:focus{outline:2px solid #ee234922;border-color:var(--accent)}
 .image-effect-controls input[type="range"]{padding:9px 0;border:0;background:transparent;accent-color:var(--accent)}
@@ -1362,10 +1440,9 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .cycle-card-actions .btn-secondary:after{content:""}
 .cycle-empty{padding:20px 0;color:#a08a91;font:italic 15px Georgia,"Times New Roman",serif}
 .cycle-preview-content{position:relative;max-width:760px;margin:0 auto;padding:clamp(28px,6vw,64px)}
-.cycle-preview-cover{display:block;max-width:100%;max-height:300px;margin:0 auto 30px;object-fit:contain}
 .cycle-preview-cover[hidden]{display:none}
-.cycle-preview-content h2{margin:13px 0;color:#fff1f3;font:700 clamp(32px,5vw,50px)/1.1 Georgia,"Times New Roman",serif}
-.cycle-preview-description{color:#c9b5bb;font:italic 16px/1.7 Georgia,"Times New Roman",serif;white-space:pre-wrap}
+.cycle-preview-content h2{overflow-wrap:anywhere;margin:13px 0;color:#fff1f3;font:700 clamp(32px,5vw,50px)/1.1 Georgia,"Times New Roman",serif}
+.cycle-preview-description{overflow-wrap:anywhere;color:#c9b5bb;font:italic 16px/1.7 Georgia,"Times New Roman",serif;white-space:pre-wrap}
 .cycle-preview-poems{display:grid;margin-top:30px;border-top:1px solid #501725}
 .cycle-preview-poem{padding:16px 0;border-bottom:1px solid #501725}
 .cycle-preview-poem strong{display:block;color:#f2e4e7;font:600 19px Georgia,"Times New Roman",serif}
@@ -1583,7 +1660,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
           <div class="preview-date" id="preview-date"></div>
           <h2 id="preview-title"></h2>
           <div class="preview-body" id="preview-body"></div>
-          <figure class="preview-figure" id="preview-figure" hidden><img id="preview-image" alt=""><figcaption id="preview-caption"></figcaption></figure>
+          <figure class="preview-figure" id="preview-figure" hidden><div class="illustration-frame" id="preview-image-frame"><img id="preview-image" alt=""></div><figcaption id="preview-caption"></figcaption></figure>
           <div class="preview-status" id="preview-status"></div>
         </div>
       </article>
@@ -1639,10 +1716,10 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
         <article class="preview-dialog cycle-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="cycle-preview-title">
           <div class="preview-toolbar"><span>PREVIEW / CYCLE</span><button class="btn-secondary" type="button" onclick="closeCyclePreview()">Закрыть <span aria-hidden="true">×</span></button></div>
           <div class="cycle-preview-content">
-            <img class="cycle-preview-cover" id="cycle-preview-cover" alt="" hidden>
             <div class="preview-index">ПОСМЕРТИЕ РИННЫ · ЦИКЛ</div>
             <h2 id="cycle-preview-title"></h2>
             <p class="cycle-preview-description" id="cycle-preview-description"></p>
+            <figure class="cycle-preview-figure" id="cycle-preview-figure" hidden><div class="illustration-frame" id="cycle-preview-image-frame"><img class="cycle-preview-cover" id="cycle-preview-cover" alt="" hidden></div><figcaption id="cycle-preview-caption"></figcaption></figure>
             <div class="cycle-preview-poems" id="cycle-preview-poems"></div>
             <div class="preview-status" id="cycle-preview-status"></div>
           </div>
@@ -1723,7 +1800,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
             <h2 id="prose-preview-title"></h2>
             <p class="prose-preview-description" id="prose-preview-description" hidden></p>
             <div class="preview-body" id="prose-preview-body"></div>
-            <figure class="preview-figure" id="prose-preview-figure" hidden><img id="prose-preview-image" alt=""><figcaption id="prose-preview-caption"></figcaption></figure>
+            <figure class="preview-figure" id="prose-preview-figure" hidden><div class="illustration-frame" id="prose-preview-image-frame"><img id="prose-preview-image" alt=""></div><figcaption id="prose-preview-caption"></figcaption></figure>
             <div class="preview-status" id="prose-preview-status"></div>
           </div>
         </article>
@@ -1738,15 +1815,8 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
         <div class="preview-toolbar"><span>EDITOR / IMAGE EFFECT</span><button class="btn-secondary" type="button" onclick="closeImageEffect(false)">Закрыть <span aria-hidden="true">×</span></button></div>
         <div class="image-effect-content">
           <div class="panel-heading"><div><span class="panel-kicker">VISUAL SETTINGS</span><h2 id="image-effect-title">Эффект изображения</h2></div></div>
-          <div class="image-effect-preview-frame" id="image-effect-preview-frame">
-            <img id="image-effect-preview-image" alt="">
-            <div class="image-effect-preview-overlay" id="image-effect-preview-overlay"></div>
-            <span class="image-effect-watermark" id="image-effect-watermark" data-position="bottom-right">© Ринна</span>
-            <div class="image-effect-preview-empty" id="image-effect-preview-empty">Выберите изображение, чтобы увидеть preview</div>
-          </div>
-          <button class="btn-secondary image-hover-toggle" id="image-hover-toggle" type="button" onclick="toggleImageHoverPreview()">Показать hover</button>
           <div class="image-effect-controls">
-            <div class="editor-field"><label for="image-effect-select">Эффект</label><select id="image-effect-select" onchange="updateImageEffectDraft()"><option value="none">Нет</option><option value="fade">Плавное появление</option><option value="darken">Затемнение</option><option value="scale">Увеличение</option><option value="glow">Свечение</option></select></div>
+            <div class="editor-field"><label for="image-effect-select">Эффект</label><select id="image-effect-select" onchange="updateImageEffectDraft()"><option value="none">Нет</option><option value="fade">Плавное появление</option><option value="darken">Затемнение</option><option value="scale">Увеличение</option><option value="glow">Свечение</option><option value="archive">Archive</option></select></div>
             <div class="editor-field"><label for="image-position-select">Позиция</label><select id="image-position-select" onchange="updateImageEffectDraft()"><option value="center">Центр</option><option value="top">Сверху</option><option value="bottom">Снизу</option><option value="left">Слева</option><option value="right">Справа</option></select></div>
             <div class="editor-field"><label for="image-scale-range">Масштаб <output id="image-scale-value">100%</output></label><input id="image-scale-range" type="range" min="80" max="150" step="1" value="100" oninput="updateImageEffectDraft()"></div>
             <div class="editor-field"><label for="image-intensity-range">Интенсивность <output id="image-intensity-value">50%</output></label><input id="image-intensity-range" type="range" min="0" max="100" step="1" value="50" oninput="updateImageEffectDraft()"></div>
@@ -1755,8 +1825,23 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
             <div class="editor-field"><label><input id="image-watermark-toggle" type="checkbox" onchange="updateImageEffectDraft()"> Показывать watermark</label></div>
             <div class="editor-field"><label for="image-watermark-position">Позиция watermark</label><select id="image-watermark-position" onchange="updateImageEffectDraft()"><option value="top-left">Сверху слева</option><option value="top-right">Сверху справа</option><option value="center">По центру</option><option value="bottom-left">Снизу слева</option><option value="bottom-right">Снизу справа</option></select></div>
             <div class="editor-field editor-field-wide"><label for="image-watermark-opacity">Прозрачность watermark <output id="image-watermark-opacity-value">42%</output></label><input id="image-watermark-opacity" type="range" min="0" max="100" step="1" value="42" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field editor-field-wide archive-settings-heading"><span class="panel-kicker">АРХИВНАЯ РАЗМЕТКА</span></div>
+            <div class="editor-field editor-field-wide"><label for="visual-record-label">Визуальная метка</label><input id="visual-record-label" type="text" maxlength="160" placeholder="POEM // VISUAL RECORD" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field"><label for="image-meta-section">Раздел</label><input id="image-meta-section" type="text" maxlength="120" placeholder="СТИХОТВОРЕНИЕ" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field"><label for="image-meta-title">Название</label><input id="image-meta-title" type="text" maxlength="160" placeholder="СПИСАНИЕ" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field"><label for="image-corner-label">Угловая метка</label><input id="image-corner-label" type="text" maxlength="100" placeholder="NORD // 01" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field"><label><input id="image-archive-markup" type="checkbox" onchange="updateImageEffectDraft()"> Показывать архивную разметку</label></div>
+            <div class="editor-field editor-field-wide"><label for="image-meta-prefix">Префикс технической подписи</label><input id="image-meta-prefix" type="text" maxlength="80" placeholder="ИЛЛЮСТРАЦИЯ" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field editor-field-wide archive-live-preview-label"><span class="panel-kicker">LIVE PREVIEW / ARCHIVE</span></div>
+            <div class="image-effect-preview-frame archive-preview-frame" id="image-effect-preview-frame">
+              <img id="image-effect-preview-image" alt="">
+              <div class="image-effect-preview-overlay" id="image-effect-preview-overlay"></div>
+              <span class="image-effect-watermark" id="image-effect-watermark" data-position="bottom-right">© Ринна</span>
+              <div class="image-effect-preview-empty" id="image-effect-preview-empty">Выберите изображение, чтобы увидеть preview</div>
+            </div>
             <div class="editor-field editor-field-wide"><label for="image-effect-caption">Подпись к изображению</label><input id="image-effect-caption" type="text" maxlength="500" placeholder="Подпись"></div>
           </div>
+          <button class="btn-secondary image-hover-toggle" id="image-hover-toggle" type="button" onclick="toggleImageHoverPreview()">Показать hover</button>
           <div class="editor-actions"><button class="btn" type="button" onclick="closeImageEffect(true)">Сохранить</button><button class="btn-secondary" type="button" onclick="closeImageEffect(false)">Отмена</button></div>
         </div>
       </section>
@@ -1785,11 +1870,22 @@ const imageEditorConfigs = {
   prose:{category:'prose',container:'prose-image-editor',imageInput:'prose-image',captionInput:'prose-image-caption'},
   cycles:{category:'cycles',container:'cycle-image-editor',imageInput:'cycle-cover',captionInput:'cycle-image-caption'}
 };
-const clientImageDefaults = {imageEffect:'none',imagePosition:'center',imageScale:100,imageIntensity:50,imageOverlay:0,imageHover:'none',imageWatermark:true,imageWatermarkOpacity:42,imageWatermarkPosition:'bottom-right'};
-function createImageEditorState(){
-  return {image:'',imageCaption:'',imageName:'',imageSize:0,...clientImageDefaults,initialImage:'',pendingDeletePaths:[],newUploads:[]};
+const clientImageBaseDefaults = {imageEffect:'none',imagePosition:'center',imageScale:100,imageIntensity:50,imageOverlay:0,imageHover:'none',imageWatermark:true,imageWatermarkOpacity:42,imageWatermarkPosition:'bottom-right',imageArchiveMarkup:true,imageMetaPrefix:'ИЛЛЮСТРАЦИЯ',imageMetaSection:'',imageMetaTitle:'',imageCornerLabel:''};
+function getClientImageDefaults(key,record=null,isNew=false){
+  const contentKind = key === 'poems' ? 'poem' : key === 'cycles' ? 'cycle' : 'prose';
+  const defaults = {...clientImageBaseDefaults,visualRecordLabel:contentKind === 'poem' ? 'POEM // VISUAL RECORD' : contentKind === 'cycle' ? 'CYCLE // VISUAL RECORD' : 'CHAPTER // VISUAL RECORD'};
+  if(isNew && !record && key === 'poems') defaults.imageMetaSection = 'СТИХОТВОРЕНИЕ';
+  if(isNew && !record && key === 'cycles') defaults.imageMetaSection = 'ЦИКЛ';
+  if(record){
+    for(const field of ['visualRecordLabel','imageMetaPrefix','imageMetaSection','imageMetaTitle','imageCornerLabel']) if(typeof record[field] === 'string') defaults[field] = record[field];
+    if(typeof record.imageArchiveMarkup === 'boolean') defaults.imageArchiveMarkup = record.imageArchiveMarkup;
+  }
+  return defaults;
 }
-let imageEditorStates = {poems:createImageEditorState(),prose:createImageEditorState(),cycles:createImageEditorState()};
+function createImageEditorState(key='poems',record=null,isNew=false){
+  return {image:'',imageCaption:'',imageName:'',imageSize:0,...getClientImageDefaults(key,record,isNew),initialImage:'',pendingDeletePaths:[],newUploads:[]};
+}
+let imageEditorStates = {poems:createImageEditorState('poems',null,true),prose:createImageEditorState('prose',null,true),cycles:createImageEditorState('cycles',null,true)};
 let activeImageEditor = '';
 let imageEffectDraft = null;
 let imageHoverPreview = false;
@@ -1846,6 +1942,57 @@ function formatImageSize(size){
   if(!size) return '';
   return size >= 1024 * 1024 ? (size / (1024 * 1024)).toFixed(2) + ' MB' : Math.max(1,Math.round(size / 1024)) + ' KB';
 }
+function ensureArchiveOverlay(frame){
+  let overlay = frame.querySelector('.archive-overlay');
+  if(overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.className = 'archive-overlay';
+  overlay.hidden = true;
+  const grid = document.createElement('span'); grid.className = 'archive-grid';
+  const outline = document.createElement('span'); outline.className = 'archive-outline';
+  const label = document.createElement('span'); label.className = 'archive-visual-label';
+  const corner = document.createElement('span'); corner.className = 'archive-corner-label';
+  const meta = document.createElement('span'); meta.className = 'archive-meta';
+  overlay.append(grid,outline,label,corner,meta);
+  frame.append(overlay);
+  return overlay;
+}
+function renderImageWatermark(frame,record){
+  if(!frame) return;
+  let watermark = frame.querySelector(':scope > .image-watermark-layer');
+  if(!watermark){
+    watermark = document.createElement('span');
+    watermark.className = 'image-watermark-layer';
+    watermark.textContent = '© Ринна';
+    frame.append(watermark);
+  }
+  const enabled = !record || record.imageWatermark !== false;
+  const opacity = Number.isInteger(Number(record && record.imageWatermarkOpacity)) && Number(record.imageWatermarkOpacity) >= 0 && Number(record.imageWatermarkOpacity) <= 100 ? Number(record.imageWatermarkOpacity) : 42;
+  const position = ['top-left','top-right','center','bottom-left','bottom-right'].includes(record && record.imageWatermarkPosition) ? record.imageWatermarkPosition : 'bottom-right';
+  watermark.hidden = !enabled || !frame.querySelector('img:not([hidden])');
+  watermark.dataset.position = position;
+  watermark.style.opacity = String(opacity / 100);
+}
+function renderArchiveMarkup(frame,record,contentKind='poem'){
+  if(!frame) return;
+  const effect = record && record.imageEffect === 'archive';
+  frame.classList.toggle('archive-frame',effect);
+  const overlay = ensureArchiveOverlay(frame);
+  const visible = effect && (!record || record.imageArchiveMarkup !== false);
+  overlay.hidden = !visible;
+  if(!visible) return;
+  const fallbackLabel = contentKind === 'poem' ? 'POEM // VISUAL RECORD' : contentKind === 'cycle' ? 'CYCLE // VISUAL RECORD' : 'CHAPTER // VISUAL RECORD';
+  const labelText = typeof record.visualRecordLabel === 'string' ? record.visualRecordLabel.trim() : fallbackLabel;
+  const cornerText = typeof record.imageCornerLabel === 'string' ? record.imageCornerLabel.trim() : '';
+  const parts = [record.imageMetaPrefix === undefined ? 'ИЛЛЮСТРАЦИЯ' : record.imageMetaPrefix,record.imageMetaSection,record.imageMetaTitle].map(value=>typeof value === 'string' ? value.trim() : '').filter(Boolean);
+  const metaText = parts.length ? '// ' + parts.join(' // ') + ' //' : '';
+  overlay.querySelector('.archive-visual-label').textContent = labelText;
+  overlay.querySelector('.archive-visual-label').hidden = !labelText;
+  overlay.querySelector('.archive-corner-label').textContent = cornerText;
+  overlay.querySelector('.archive-corner-label').hidden = !cornerText;
+  overlay.querySelector('.archive-meta').textContent = metaText;
+  overlay.querySelector('.archive-meta').hidden = !metaText;
+}
 function renderImageEditorPreview(key){
   const state = imageEditorStates[key];
   const config = imageEditorConfigs[key];
@@ -1853,6 +2000,7 @@ function renderImageEditorPreview(key){
   const placeholder = document.getElementById('image-placeholder-' + key);
   if(!image || !placeholder) return;
   const watermark = document.getElementById('image-watermark-' + key);
+  const frame = image.parentElement;
   const source = safeImageSource(state.image);
   if(source){
     image.onerror = ()=>{image.hidden = true;placeholder.hidden = false;placeholder.textContent = 'Не удалось загрузить preview';};
@@ -1866,11 +2014,9 @@ function renderImageEditorPreview(key){
     placeholder.hidden = false;
     placeholder.textContent = 'Предпросмотр изображения';
   }
-  if(watermark){
-    watermark.hidden = !source || !imageEditorStates[key].imageWatermark;
-    watermark.dataset.position = imageEditorStates[key].imageWatermarkPosition;
-    watermark.style.opacity = String(imageEditorStates[key].imageWatermarkOpacity / 100);
-  }
+  renderImageWatermark(frame,state);
+  if(source) applySavedImageEffects(image,state,key === 'poems' ? 'poem' : key === 'cycles' ? 'cycle' : 'prose');
+  else renderArchiveMarkup(frame,{imageEffect:'none'},key === 'poems' ? 'poem' : key === 'cycles' ? 'cycle' : 'prose');
   const name = document.getElementById('image-name-' + key);
   const size = document.getElementById('image-size-' + key);
   if(name) name.textContent = state.imageName || (state.image ? state.image.split('/').pop() : 'Файл не выбран');
@@ -1881,19 +2027,22 @@ function renderImageEditorPreview(key){
 }
 function initializeImageEditor(key,record){
   const config = imageEditorConfigs[key];
-  const state = createImageEditorState();
+  const defaults = getClientImageDefaults(key,record,!record);
+  const state = createImageEditorState(key,record,!record);
   state.image = (record && (record.image || (key === 'cycles' && record.cover))) || '';
   state.imageCaption = record ? (typeof record.imageCaption === 'string' ? record.imageCaption : (key === 'poems' && typeof record.caption === 'string' ? record.caption : '')) : '';
   state.imageName = record && record.imageName || (state.image ? state.image.split('/').pop() : '');
   state.imageSize = record && Number(record.imageSize) || 0;
-  for(const setting of Object.keys(clientImageDefaults)){
+  for(const setting of Object.keys(defaults)){
     if(!record || record[setting] === undefined) continue;
     const value = record[setting];
-        if(setting === 'imageEffect' && ['none','fade','darken','scale','zoom','glow'].includes(value)) state[setting] = value === 'zoom' ? 'scale' : value;
+    if(setting === 'imageEffect' && ['none','fade','darken','scale','zoom','glow','archive'].includes(value)) state[setting] = value === 'zoom' ? 'scale' : value;
     else if(setting === 'imagePosition' && ['center','top','bottom','left','right'].includes(value)) state[setting] = value;
     else if(setting === 'imageHover' && ['none','scale','zoom','glow'].includes(value)) state[setting] = value === 'zoom' ? 'scale' : value;
     else if(setting === 'imageWatermark' && typeof value === 'boolean') state[setting] = value;
     else if(setting === 'imageWatermarkPosition' && ['top-left','top-right','center','bottom-left','bottom-right'].includes(value)) state[setting] = value;
+    else if(setting === 'imageArchiveMarkup' && typeof value === 'boolean') state[setting] = value;
+    else if(['visualRecordLabel','imageMetaPrefix','imageMetaSection','imageMetaTitle','imageCornerLabel'].includes(setting) && typeof value === 'string') state[setting] = value;
     else if(['imageScale','imageIntensity','imageOverlay','imageWatermarkOpacity'].includes(setting) && Number.isInteger(Number(value))){
       const number = Number(value);
       const min = setting === 'imageScale' ? 80 : 0;
@@ -1918,7 +2067,7 @@ function getImageEditorData(key){
   const captionInput = document.getElementById(config.captionInput);
   state.image = imageInput ? imageInput.value.trim() : state.image;
   state.imageCaption = captionInput ? captionInput.value.trim() : state.imageCaption;
-  return {image:state.image,imageCaption:state.imageCaption,imageName:state.imageName,imageSize:state.imageSize,imageEffect:state.imageEffect,imagePosition:state.imagePosition,imageScale:state.imageScale,imageIntensity:state.imageIntensity,imageOverlay:state.imageOverlay,imageHover:state.imageHover,imageWatermark:state.imageWatermark,imageWatermarkOpacity:state.imageWatermarkOpacity,imageWatermarkPosition:state.imageWatermarkPosition};
+  return {image:state.image,imageCaption:state.imageCaption,imageName:state.imageName,imageSize:state.imageSize,imageEffect:state.imageEffect,imagePosition:state.imagePosition,imageScale:state.imageScale,imageIntensity:state.imageIntensity,imageOverlay:state.imageOverlay,imageHover:state.imageHover,imageWatermark:state.imageWatermark,imageWatermarkOpacity:state.imageWatermarkOpacity,imageWatermarkPosition:state.imageWatermarkPosition,imageArchiveMarkup:state.imageArchiveMarkup,visualRecordLabel:state.visualRecordLabel,imageMetaPrefix:state.imageMetaPrefix,imageMetaSection:state.imageMetaSection,imageMetaTitle:state.imageMetaTitle,imageCornerLabel:state.imageCornerLabel};
 }
 function showImageEditorError(key,message){
   const error = document.getElementById('image-error-' + key);
@@ -2014,7 +2163,7 @@ async function cleanupUncommittedImageUploads(key){
 function openImageEffect(key){
   activeImageEditor = key;
   const state = imageEditorStates[key];
-  imageEffectDraft = {imageEffect:state.imageEffect,imagePosition:state.imagePosition,imageScale:state.imageScale,imageIntensity:state.imageIntensity,imageOverlay:state.imageOverlay,imageHover:state.imageHover,imageCaption:document.getElementById(imageEditorConfigs[key].captionInput).value,imageWatermark:state.imageWatermark,imageWatermarkOpacity:state.imageWatermarkOpacity,imageWatermarkPosition:state.imageWatermarkPosition};
+  imageEffectDraft = {imageEffect:state.imageEffect,imagePosition:state.imagePosition,imageScale:state.imageScale,imageIntensity:state.imageIntensity,imageOverlay:state.imageOverlay,imageHover:state.imageHover,imageCaption:document.getElementById(imageEditorConfigs[key].captionInput).value,imageWatermark:state.imageWatermark,imageWatermarkOpacity:state.imageWatermarkOpacity,imageWatermarkPosition:state.imageWatermarkPosition,imageArchiveMarkup:state.imageArchiveMarkup,visualRecordLabel:state.visualRecordLabel,imageMetaPrefix:state.imageMetaPrefix,imageMetaSection:state.imageMetaSection,imageMetaTitle:state.imageMetaTitle,imageCornerLabel:state.imageCornerLabel};
   imageHoverPreview = false;
   document.getElementById('image-effect-select').value = imageEffectDraft.imageEffect;
   document.getElementById('image-position-select').value = imageEffectDraft.imagePosition;
@@ -2025,6 +2174,12 @@ function openImageEffect(key){
   document.getElementById('image-watermark-toggle').checked = imageEffectDraft.imageWatermark;
   document.getElementById('image-watermark-position').value = imageEffectDraft.imageWatermarkPosition;
   document.getElementById('image-watermark-opacity').value = imageEffectDraft.imageWatermarkOpacity;
+  document.getElementById('image-archive-markup').checked = imageEffectDraft.imageArchiveMarkup;
+  document.getElementById('visual-record-label').value = imageEffectDraft.visualRecordLabel;
+  document.getElementById('image-meta-prefix').value = imageEffectDraft.imageMetaPrefix;
+  document.getElementById('image-meta-section').value = imageEffectDraft.imageMetaSection;
+  document.getElementById('image-meta-title').value = imageEffectDraft.imageMetaTitle;
+  document.getElementById('image-corner-label').value = imageEffectDraft.imageCornerLabel;
   document.getElementById('image-effect-caption').value = imageEffectDraft.imageCaption;
   document.getElementById('image-hover-toggle').classList.remove('active');
   document.getElementById('image-hover-toggle').textContent = 'Показать hover';
@@ -2043,6 +2198,12 @@ function updateImageEffectDraft(previewHover=false){
   imageEffectDraft.imageWatermark = document.getElementById('image-watermark-toggle').checked;
   imageEffectDraft.imageWatermarkPosition = document.getElementById('image-watermark-position').value;
   imageEffectDraft.imageWatermarkOpacity = Number(document.getElementById('image-watermark-opacity').value);
+  imageEffectDraft.imageArchiveMarkup = document.getElementById('image-archive-markup').checked;
+  imageEffectDraft.visualRecordLabel = document.getElementById('visual-record-label').value;
+  imageEffectDraft.imageMetaPrefix = document.getElementById('image-meta-prefix').value;
+  imageEffectDraft.imageMetaSection = document.getElementById('image-meta-section').value;
+  imageEffectDraft.imageMetaTitle = document.getElementById('image-meta-title').value;
+  imageEffectDraft.imageCornerLabel = document.getElementById('image-corner-label').value;
   if(previewHover){
     imageHoverPreview = imageEffectDraft.imageHover !== 'none';
     const hoverButton = document.getElementById('image-hover-toggle');
@@ -2071,6 +2232,8 @@ function renderImageEffectPreview(){
   const watermark = document.getElementById('image-effect-watermark');
   const empty = document.getElementById('image-effect-preview-empty');
   const source = safeImageSource(state.image);
+  const contentKind = activeImageEditor === 'poems' ? 'poem' : activeImageEditor === 'cycles' ? 'cycle' : 'prose';
+  renderArchiveMarkup(frame,imageEffectDraft,contentKind);
   watermark.hidden = !imageEffectDraft.imageWatermark || !source;
   watermark.dataset.position = imageEffectDraft.imageWatermarkPosition;
   watermark.style.opacity = String(imageEffectDraft.imageWatermarkOpacity / 100);
@@ -2085,7 +2248,7 @@ function renderImageEffectPreview(){
   const overlayIntensity = imageEffectDraft.imageOverlay / 100;
   let scale = imageEffectDraft.imageScale / 100 * (effect === 'scale' ? 1 + intensity * .25 : 1);
   let opacity = effect === 'fade' ? .4 + intensity * .6 : 1;
-  let brightness = effect === 'darken' ? 1 - intensity * .65 : 1;
+  let brightness = effect === 'darken' ? 1 - intensity * .65 : effect === 'archive' ? .88 : 1;
   let shadow = effect === 'glow' ? '0 0 ' + (8 + intensity * 30) + 'px rgba(238,35,73,' + (.15 + intensity * .65) + ')' : 'none';
   if(imageHoverPreview){
     if(imageEffectDraft.imageHover === 'scale') scale *= 1.12;
@@ -2437,7 +2600,7 @@ function fillProsePreview(entry){
   image.onload = ()=>{figure.hidden = false;};
   if(source){
     image.src = source;
-    applySavedImageEffects(image,entry);
+    applySavedImageEffects(image,entry,'prose');
     caption.textContent = entry.imageCaption || '';
     caption.hidden = !entry.imageCaption;
     figure.hidden = false;
@@ -2552,8 +2715,8 @@ function safeImageSource(value){
     return '';
   }
 }
-function applySavedImageEffects(image,record){
-  const effect = ['none','fade','darken','scale','zoom','glow'].includes(record.imageEffect) ? (record.imageEffect === 'zoom' ? 'scale' : record.imageEffect) : 'none';
+function applySavedImageEffects(image,record,contentKind='poem'){
+  const effect = ['none','fade','darken','scale','zoom','glow','archive'].includes(record.imageEffect) ? (record.imageEffect === 'zoom' ? 'scale' : record.imageEffect) : 'none';
   const position = ['center','top','bottom','left','right'].includes(record.imagePosition) ? record.imagePosition : 'center';
   const hover = ['none','scale','zoom','glow'].includes(record.imageHover) ? (record.imageHover === 'zoom' ? 'scale' : record.imageHover) : 'none';
   const baseScale = Number.isFinite(Number(record.imageScale)) ? Number(record.imageScale) : 100;
@@ -2562,7 +2725,7 @@ function applySavedImageEffects(image,record){
   const positions = {center:'50% 50%',top:'50% 0%',bottom:'50% 100%',left:'0% 50%',right:'100% 50%'};
   image.style.objectPosition = positions[position];
   image.style.opacity = effect === 'fade' ? String(.4 + intensity * .6) : '1';
-  const darken = effect === 'darken' ? intensity * .65 : 0;
+  const darken = effect === 'darken' ? intensity * .65 : effect === 'archive' ? .12 : 0;
   image.style.filter = 'brightness(' + Math.max(0,1 - darken - overlay * .65) + ')';
   const scale = baseScale / 100 * (effect === 'scale' ? 1 + intensity * .25 : 1);
   image.style.transform = 'scale(' + scale + ')';
@@ -2576,6 +2739,8 @@ function applySavedImageEffects(image,record){
     image.style.transform = 'scale(' + scale + ')';
     image.style.boxShadow = effect === 'glow' ? '0 0 ' + (8 + intensity * 30) + 'px rgba(238,35,73,' + (.15 + intensity * .65) + ')' : 'none';
   };
+  renderArchiveMarkup(image.parentElement,record,contentKind);
+  renderImageWatermark(image.parentElement,record);
 }
 function fillPoemPreview(poem){
   document.getElementById('preview-title').textContent = poem.title || 'Без названия';
@@ -2589,10 +2754,11 @@ function fillPoemPreview(poem){
   image.onload = ()=>{figure.hidden = false;};
   if(source){
     image.src = source;
-    applySavedImageEffects(image,poem);
+    applySavedImageEffects(image,poem,'poem');
     figure.hidden = false;
-    document.getElementById('preview-caption').textContent = poem.caption || '';
-    document.getElementById('preview-caption').hidden = !poem.caption;
+    const caption = typeof poem.imageCaption === 'string' ? poem.imageCaption : (poem.caption || '');
+    document.getElementById('preview-caption').textContent = caption;
+    document.getElementById('preview-caption').hidden = !caption;
   }else{
     image.removeAttribute('src');
     figure.hidden = true;
@@ -3165,15 +3331,21 @@ function fillCyclePreview(cycle){
   document.getElementById('cycle-preview-description').textContent = cycle.description || '';
   document.getElementById('cycle-preview-status').textContent = cycle.status === 'published' ? 'Опубликован' : 'Черновик';
   const cover = document.getElementById('cycle-preview-cover');
-  const source = safeImageSource(cycle.cover);
+  const figure = document.getElementById('cycle-preview-figure');
+  const source = safeImageSource(cycle.image || cycle.cover);
   cover.onerror = ()=>{cover.hidden = true;};
   if(source){
     cover.src = source;
-    applySavedImageEffects(cover,cycle);
+    applySavedImageEffects(cover,cycle,'cycle');
     cover.hidden = false;
+    figure.hidden = false;
+    const caption = document.getElementById('cycle-preview-caption');
+    caption.textContent = cycle.imageCaption || '';
+    caption.hidden = !cycle.imageCaption;
   }else{
     cover.removeAttribute('src');
     cover.hidden = true;
+    figure.hidden = true;
   }
   const list = document.getElementById('cycle-preview-poems');
   list.replaceChildren();
@@ -3290,14 +3462,14 @@ function show(id,button){
 }
 
 mountAllImageEditors();
-document.querySelectorAll('.preview-figure img, #image-effect-preview-image').forEach(image=>{image.draggable=false;});
+document.querySelectorAll('.preview-figure img, .cycle-preview-figure img, #image-effect-preview-image').forEach(image=>{image.draggable=false;});
 document.addEventListener('contextmenu',event=>{
-  if(event.target instanceof HTMLImageElement && (event.target.closest('.image-editor-preview') || event.target.id === 'image-effect-preview-image' || event.target.closest('.preview-figure'))){
+  if(event.target instanceof HTMLImageElement && (event.target.closest('.image-editor-preview') || event.target.id === 'image-effect-preview-image' || event.target.closest('.preview-figure') || event.target.closest('.cycle-preview-figure'))){
     event.preventDefault();
   }
 });
 document.addEventListener('dragstart',event=>{
-  if(event.target instanceof HTMLImageElement && (event.target.closest('.image-editor-preview') || event.target.id === 'image-effect-preview-image' || event.target.closest('.preview-figure'))){
+  if(event.target instanceof HTMLImageElement && (event.target.closest('.image-editor-preview') || event.target.id === 'image-effect-preview-image' || event.target.closest('.preview-figure') || event.target.closest('.cycle-preview-figure'))){
     event.preventDefault();
   }
 });
