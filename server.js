@@ -1845,11 +1845,11 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
             <div class="editor-field editor-field-wide"><label for="image-watermark-opacity">Прозрачность watermark <output id="image-watermark-opacity-value">42%</output></label><input id="image-watermark-opacity" type="range" min="0" max="100" step="1" value="42" oninput="updateImageEffectDraft()"></div>
             <div class="editor-field editor-field-wide archive-settings-heading"><span class="panel-kicker">АРХИВНАЯ РАЗМЕТКА</span></div>
             <div class="editor-field editor-field-wide"><label for="visual-record-label">Визуальная метка</label><input id="visual-record-label" type="text" maxlength="160" placeholder="POEM // VISUAL RECORD" oninput="updateImageEffectDraft()"></div>
-            <div class="editor-field"><label for="image-meta-section">Раздел</label><input id="image-meta-section" type="text" maxlength="120" placeholder="СТИХОТВОРЕНИЕ" oninput="updateImageEffectDraft()"></div>
-            <div class="editor-field"><label for="image-meta-title">Название</label><input id="image-meta-title" type="text" maxlength="160" placeholder="СПИСАНИЕ" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field editor-field-wide"><label for="image-meta-prefix">Тип иллюстрации</label><input id="image-meta-prefix" type="text" maxlength="80" placeholder="ИЛЛЮСТРАЦИЯ" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field"><label for="image-meta-section">Раздел</label><input id="image-meta-section" type="text" maxlength="120" placeholder="СЕВЕРНЫЙ СОЮЗ" oninput="updateImageEffectDraft()"></div>
+            <div class="editor-field"><label for="image-meta-title">Название</label><input id="image-meta-title" type="text" maxlength="160" placeholder="ГЛАВА 01" oninput="updateImageEffectDraft()"></div>
             <div class="editor-field"><label for="image-corner-label">Угловая метка</label><input id="image-corner-label" type="text" maxlength="100" placeholder="NORD // 01" oninput="updateImageEffectDraft()"></div>
             <div class="editor-field"><label><input id="image-archive-markup" type="checkbox" onchange="updateImageEffectDraft()"> Показывать архивную разметку</label></div>
-            <div class="editor-field editor-field-wide"><label for="image-meta-prefix">Префикс технической подписи</label><input id="image-meta-prefix" type="text" maxlength="80" placeholder="ИЛЛЮСТРАЦИЯ" oninput="updateImageEffectDraft()"></div>
             <div class="editor-field editor-field-wide archive-live-preview-label"><span class="panel-kicker">LIVE PREVIEW / ARCHIVE</span></div>
             <div class="image-effect-preview-frame archive-preview-frame" id="image-effect-preview-frame" data-empty="true">
               <img id="image-effect-preview-image" alt="">
@@ -1895,6 +1895,10 @@ function getClientImageDefaults(key,record=null,isNew=false){
   const defaults = {...clientImageBaseDefaults,visualRecordLabel:contentKind === 'poem' ? 'POEM // VISUAL RECORD' : contentKind === 'cycle' ? 'CYCLE // VISUAL RECORD' : 'CHAPTER // VISUAL RECORD'};
   if(isNew && !record && key === 'poems') defaults.imageMetaSection = 'СТИХОТВОРЕНИЕ';
   if(isNew && !record && key === 'cycles') defaults.imageMetaSection = 'ЦИКЛ';
+  if(key === 'prose'){
+    defaults.imageMetaSection = 'СЕВЕРНЫЙ СОЮЗ';
+    defaults.imageMetaTitle = 'ГЛАВА 01';
+  }
   if(record){
     for(const field of ['visualRecordLabel','imageMetaPrefix','imageMetaSection','imageMetaTitle','imageCornerLabel']) if(typeof record[field] === 'string') defaults[field] = record[field];
     if(typeof record.imageArchiveMarkup === 'boolean') defaults.imageArchiveMarkup = record.imageArchiveMarkup;
@@ -2056,7 +2060,9 @@ function renderArchiveMarkup(frame,record,contentKind='poem'){
   const fallbackLabel = contentKind === 'poem' ? 'POEM // VISUAL RECORD' : contentKind === 'cycle' ? 'CYCLE // VISUAL RECORD' : 'CHAPTER // VISUAL RECORD';
   const labelText = typeof record.visualRecordLabel === 'string' ? record.visualRecordLabel.trim() : fallbackLabel;
   const cornerText = typeof record.imageCornerLabel === 'string' ? record.imageCornerLabel.trim() : '';
-  const parts = [record.imageMetaPrefix === undefined ? 'ИЛЛЮСТРАЦИЯ' : record.imageMetaPrefix,record.imageMetaSection,record.imageMetaTitle].map(value=>typeof value === 'string' ? value.trim() : '').filter(Boolean);
+  const metaSection = record.imageMetaSection === undefined && contentKind === 'prose' ? 'СЕВЕРНЫЙ СОЮЗ' : record.imageMetaSection;
+  const metaTitle = record.imageMetaTitle === undefined && contentKind === 'prose' ? 'ГЛАВА 01' : record.imageMetaTitle;
+  const parts = [record.imageMetaPrefix === undefined ? 'ИЛЛЮСТРАЦИЯ' : record.imageMetaPrefix,metaSection,metaTitle].map(value=>typeof value === 'string' ? value.trim() : '').filter(Boolean);
   const metaText = parts.length ? '// ' + parts.join(' // ') + ' //' : '';
   overlay.querySelector('.archive-visual-label').textContent = labelText;
   overlay.querySelector('.archive-visual-label').hidden = !labelText;
@@ -2240,6 +2246,8 @@ function openImageEffect(key){
   document.getElementById('image-meta-prefix').value = imageEffectDraft.imageMetaPrefix;
   document.getElementById('image-meta-section').value = imageEffectDraft.imageMetaSection;
   document.getElementById('image-meta-title').value = imageEffectDraft.imageMetaTitle;
+  document.getElementById('image-meta-section').placeholder = key === 'poems' ? 'СТИХОТВОРЕНИЕ' : key === 'cycles' ? 'ЦИКЛ' : 'СЕВЕРНЫЙ СОЮЗ';
+  document.getElementById('image-meta-title').placeholder = key === 'prose' ? 'ГЛАВА 01' : 'СПИСАНИЕ';
   document.getElementById('image-corner-label').value = imageEffectDraft.imageCornerLabel;
   document.getElementById('image-effect-caption').value = imageEffectDraft.imageCaption;
   document.getElementById('image-hover-toggle').classList.remove('active');
