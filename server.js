@@ -1352,21 +1352,22 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .preview-poem h2{overflow-wrap:anywhere;margin:12px 0 27px;color:#fff1f3;font:700 clamp(30px,5vw,48px)/1.12 Georgia,"Times New Roman",serif}
 .preview-body{color:#e3d5d9;font:18px/1.9 Georgia,"Times New Roman",serif;white-space:pre-wrap}
 .preview-figure{position:relative;display:block;clear:both;box-sizing:border-box;width:100%;max-width:700px;overflow:hidden;isolation:isolate;margin:36px 0 0;background:#0b0709}
-.illustration-frame{position:relative;display:block;box-sizing:border-box;width:100%;height:clamp(220px,52vw,440px);overflow:hidden;isolation:isolate;border:1px solid transparent;background:#0b0709}
+.illustration-frame{position:relative;display:block;box-sizing:border-box;width:100%;height:auto;overflow:hidden;isolation:isolate;container-type:inline-size;border:0;background:#0b0709}
 .illustration-frame>img{position:absolute;z-index:0;inset:0;display:block;width:100%;height:100%;margin:0;object-fit:contain;transform-origin:center center}
-.illustration-frame.archive-frame{border-color:#762038;box-shadow:inset 0 0 0 1px #ed29401c}
-.image-darkening-layer,.image-effect-preview-overlay{position:absolute;z-index:1;inset:0;pointer-events:none;transition:background .2s}
+.illustration-frame.archive-frame{border-color:transparent;box-shadow:none}
+.illustration-frame.archive-frame:before{position:absolute;z-index:3;inset:var(--image-inset-top,0%) var(--image-inset-right,0%) var(--image-inset-bottom,0%) var(--image-inset-left,0%);box-sizing:border-box;content:"";border:1px solid #762038;box-shadow:inset 0 0 0 1px #ed29401c;pointer-events:none}
+.image-darkening-layer,.image-effect-preview-overlay{position:absolute;z-index:1;inset:var(--image-inset-top,0%) var(--image-inset-right,0%) var(--image-inset-bottom,0%) var(--image-inset-left,0%);pointer-events:none;transition:background .2s}
 .image-darkening-layer[hidden]{display:none}
-.archive-overlay{position:absolute;z-index:2;inset:0;overflow:hidden;pointer-events:none;color:#f5eff0;font:700 9px/1.35 Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase;user-select:none;-webkit-user-select:none}
+.archive-overlay{position:absolute;z-index:2;inset:var(--image-inset-top,0%) var(--image-inset-right,0%) var(--image-inset-bottom,0%) var(--image-inset-left,0%);overflow:hidden;pointer-events:none;color:#f5eff0;font:700 clamp(6px,2.2cqw,9px)/1.35 Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase;user-select:none;-webkit-user-select:none}
 .archive-overlay[hidden]{display:none}
 .archive-grid{position:absolute;z-index:1;inset:0;background:repeating-linear-gradient(0deg,transparent 0 5px,#fff1 5px 6px),repeating-linear-gradient(90deg,transparent 0 44px,#ee234912 44px 45px),linear-gradient(90deg,transparent 8%,#ee23491c 8.1%,transparent 8.2%,transparent 91%,#ee23491c 91.1%,transparent 91.2%)}
 .archive-outline{position:absolute;z-index:2;inset:7px;border:1px solid #a72b441c}
 .archive-outline:before,.archive-outline:after{position:absolute;content:"";width:22px;height:22px;border-color:#ec3150;border-style:solid;opacity:.72}
 .archive-outline:before{top:-1px;left:-1px;border-width:1px 0 0 1px}
 .archive-outline:after{right:-1px;bottom:-1px;border-width:0 1px 1px 0}
-.archive-visual-label,.archive-corner-label{position:absolute;z-index:3;top:13px;max-width:44%;overflow:hidden;padding:5px 7px;background:#10080bc9;text-overflow:ellipsis;white-space:nowrap}
-.archive-visual-label{left:13px;border-left:1px solid #ee2349}
-.archive-corner-label{right:13px;color:#ef8191;text-align:right}
+.archive-visual-label,.archive-corner-label{position:absolute;z-index:3;max-width:44%;overflow:hidden;padding:clamp(3px,1.5cqw,7px);background:#10080bc9;text-overflow:ellipsis;white-space:nowrap}
+.archive-visual-label{bottom:calc(var(--image-inset-bottom,0%) + clamp(5px,1.5cqw,12px));left:calc(var(--image-inset-left,0%) + clamp(5px,1.5cqw,12px));border-left:1px solid #ee2349}
+.archive-corner-label{top:calc(var(--image-inset-top,0%) + clamp(5px,1.5cqw,12px));right:calc(var(--image-inset-right,0%) + clamp(5px,1.5cqw,12px));color:#ef8191;text-align:right}
 .archive-corner-label[hidden]{display:none}
 .archive-meta-caption{display:block;box-sizing:border-box;width:100%;margin:0;padding:8px 10px;border-left:1px solid #ee2349;background:linear-gradient(90deg,#10080bd9,#10080b88 80%,transparent);color:#eee0e3;text-align:left;font:700 8px/1.6 Arial,sans-serif;letter-spacing:.1em;overflow-wrap:anywhere}
 .preview-figure figcaption .archive-meta-caption,.cycle-preview-figure figcaption .archive-meta-caption{color:#eee0e3;text-align:left;font:700 8px/1.6 Arial,sans-serif;letter-spacing:.1em}
@@ -1377,11 +1378,12 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .image-caption-text{display:block;padding:2px 12px 8px}
 .cycle-preview-figure{position:relative;display:block;clear:both;width:100%;max-width:760px;overflow:hidden;margin:0 auto 30px;isolation:isolate;background:#0b0709}
 .cycle-preview-content h2{overflow-wrap:anywhere}
-.cycle-preview-figure .illustration-frame{height:clamp(220px,36vw,300px)}
+.cycle-preview-figure .illustration-frame{height:auto}
 .preview-status{margin-top:26px;color:#a83b53;font-size:9px;font-weight:700;letter-spacing:.2em;text-transform:uppercase}
 .image-editor{padding:15px;border:1px solid #421722;background:linear-gradient(145deg,#170b10,#10080b)}
 .image-editor-layout{display:grid;grid-template-columns:minmax(150px,220px) minmax(0,1fr);gap:16px}
-.image-editor-preview{position:relative;display:grid;place-items:center;height:180px;min-height:0;overflow:hidden;isolation:isolate;border:1px solid #5a1c2d;background:#0b0709}
+.image-editor-preview{position:relative;display:grid;place-items:center;width:100%;height:auto;min-height:0;overflow:hidden;isolation:isolate;container-type:inline-size;box-shadow:inset 0 0 0 1px #5a1c2d;background:#0b0709}
+.image-editor-preview[data-empty="true"]{height:180px}
 .image-editor-preview img{position:absolute;z-index:0;inset:0;width:100%;height:100%;min-height:0;object-fit:contain;transform-origin:center center}
 .image-editor-preview img,.image-effect-preview-frame img,.preview-figure img{-webkit-user-drag:none;user-select:none}
 .image-editor-preview img[hidden]{display:none}
@@ -1400,18 +1402,19 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .image-effect-content{padding:22px}
 .image-effect-content .panel-heading{justify-content:flex-start}
 .image-effect-content .panel-heading h2{margin-top:3px}
-.image-effect-preview-frame{position:relative;box-sizing:border-box;height:280px;overflow:hidden;isolation:isolate;border:1px solid #682035;background:#0a0608}
-.image-effect-preview-frame img{position:absolute;z-index:0;inset:0;width:100%;height:100%;object-fit:cover;transform-origin:center center;transition:opacity .35s,transform .35s,filter .35s,box-shadow .35s}
+.image-effect-preview-frame{position:relative;box-sizing:border-box;width:100%;height:auto;min-height:0;overflow:hidden;isolation:isolate;container-type:inline-size;box-shadow:inset 0 0 0 1px #682035;background:#0a0608}
+.image-effect-preview-frame[data-empty="true"]{height:280px}
+.image-effect-preview-frame img{position:absolute;z-index:0;inset:0;width:100%;height:100%;object-fit:contain;transform-origin:center center;transition:opacity .35s,transform .35s,filter .35s,box-shadow .35s}
 .image-effect-preview-frame img[hidden]{display:none}
 .image-effect-preview-overlay{z-index:1}
 .image-effect-preview-empty{position:absolute;z-index:5;inset:0;display:grid;place-items:center;color:#806b72;font:italic 14px Georgia,"Times New Roman",serif}
 .image-effect-preview-empty[hidden]{display:none}
-.image-watermark-layer,.image-effect-watermark{position:absolute;z-index:4;pointer-events:none;color:#fff;font:700 19px/1.2 Georgia,"Times New Roman",serif;letter-spacing:.03em;text-shadow:0 2px 5px #000,0 0 2px #000;user-select:none;-webkit-user-select:none}
-.image-watermark-layer[data-position="top-left"],.image-effect-watermark[data-position="top-left"]{top:12px;left:12px}
-.image-watermark-layer[data-position="top-right"],.image-effect-watermark[data-position="top-right"]{top:12px;right:12px}
-.image-watermark-layer[data-position="center"],.image-effect-watermark[data-position="center"]{top:50%;left:50%;transform:translate(-50%,-50%)}
-.image-watermark-layer[data-position="bottom-left"],.image-effect-watermark[data-position="bottom-left"]{bottom:12px;left:12px}
-.image-watermark-layer[data-position="bottom-right"],.image-effect-watermark[data-position="bottom-right"]{bottom:12px;right:12px}
+.image-watermark-layer,.image-effect-watermark{position:absolute;z-index:4;max-width:70%;pointer-events:none;color:#fff;font:700 clamp(8px,4cqw,19px)/1.2 Georgia,"Times New Roman",serif;letter-spacing:.03em;text-shadow:0 2px 5px #000,0 0 2px #000;user-select:none;-webkit-user-select:none}
+.image-watermark-layer[data-position="top-left"],.image-effect-watermark[data-position="top-left"]{top:calc(var(--image-inset-top,0%) + clamp(5px,1.7cqw,12px));left:calc(var(--image-inset-left,0%) + clamp(5px,1.7cqw,12px))}
+.image-watermark-layer[data-position="top-right"],.image-effect-watermark[data-position="top-right"]{top:calc(var(--image-inset-top,0%) + clamp(5px,1.7cqw,12px));right:calc(var(--image-inset-right,0%) + clamp(5px,1.7cqw,12px))}
+.image-watermark-layer[data-position="center"],.image-effect-watermark[data-position="center"]{top:calc(var(--image-inset-top,0%) + (100% - var(--image-inset-top,0%) - var(--image-inset-bottom,0%)) / 2);left:calc(var(--image-inset-left,0%) + (100% - var(--image-inset-left,0%) - var(--image-inset-right,0%)) / 2);transform:translate(-50%,-50%)}
+.image-watermark-layer[data-position="bottom-left"],.image-effect-watermark[data-position="bottom-left"]{bottom:calc(var(--image-inset-bottom,0%) + clamp(5px,1.7cqw,12px));left:calc(var(--image-inset-left,0%) + clamp(5px,1.7cqw,12px))}
+.image-watermark-layer[data-position="bottom-right"],.image-effect-watermark[data-position="bottom-right"]{bottom:calc(var(--image-inset-bottom,0%) + clamp(5px,1.7cqw,12px));right:calc(var(--image-inset-right,0%) + clamp(5px,1.7cqw,12px))}
 .image-hover-toggle{margin-top:9px;padding:7px 10px;font-size:11px}
 .image-hover-toggle:after{content:""}
 .image-hover-toggle.active{border-color:#bf3150;background:#35101b;color:#fff}
@@ -1419,7 +1422,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .image-effect-controls .archive-settings-heading,.image-effect-controls .archive-live-preview-label,.image-effect-controls .archive-preview-frame{grid-column:1/-1}
 .archive-settings-heading{margin-top:15px;padding-top:14px;border-top:1px solid #602033}
 .archive-live-preview-label{margin-top:10px}
-.archive-preview-frame{width:100%;height:300px}
+.archive-preview-frame{width:100%;height:auto}
 .archive-preview-frame>img{object-fit:contain}
 .image-effect-controls select{width:100%;padding:12px;background:#0b0709;color:#f5eff0;border:1px solid #51202a;border-radius:2px}
 .image-effect-controls select:focus{outline:2px solid #ee234922;border-color:var(--accent)}
@@ -1498,10 +1501,10 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
   .editor-fields{grid-template-columns:1fr}
   .editor-field-wide{grid-column:auto}
   .image-editor-layout{grid-template-columns:1fr}
-  .image-editor-preview{min-height:180px}
+  .image-editor-preview[data-empty="true"]{height:180px}
   .image-effect-controls{grid-template-columns:1fr}
   .image-effect-controls .editor-field-wide{grid-column:auto}
-  .image-effect-preview-frame{height:210px}
+  .image-effect-preview-frame[data-empty="true"]{height:210px}
   .cycle-picker{flex-direction:column}
   .stats{gap:9px}
   .stat-card{padding:15px 13px}
@@ -1848,7 +1851,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
             <div class="editor-field"><label><input id="image-archive-markup" type="checkbox" onchange="updateImageEffectDraft()"> Показывать архивную разметку</label></div>
             <div class="editor-field editor-field-wide"><label for="image-meta-prefix">Префикс технической подписи</label><input id="image-meta-prefix" type="text" maxlength="80" placeholder="ИЛЛЮСТРАЦИЯ" oninput="updateImageEffectDraft()"></div>
             <div class="editor-field editor-field-wide archive-live-preview-label"><span class="panel-kicker">LIVE PREVIEW / ARCHIVE</span></div>
-            <div class="image-effect-preview-frame archive-preview-frame" id="image-effect-preview-frame">
+            <div class="image-effect-preview-frame archive-preview-frame" id="image-effect-preview-frame" data-empty="true">
               <img id="image-effect-preview-image" alt="">
               <div class="image-effect-preview-overlay" id="image-effect-preview-overlay"></div>
               <span class="image-effect-watermark" id="image-effect-watermark" data-position="bottom-right">© Ринна</span>
@@ -1913,7 +1916,7 @@ function mountImageEditor(key){
   container.innerHTML = \`<div class="image-editor">
     <div class="panel-heading"><h2>Иллюстрация</h2><span class="panel-kicker">IMAGE / \${config.category.toUpperCase()}</span></div>
     <div class="image-editor-layout">
-      <div class="image-editor-preview"><img id="image-preview-\${key}" alt="" draggable="false" hidden><span class="image-watermark-layer" data-position="bottom-right" id="image-watermark-\${key}" hidden>© Ринна</span><div class="image-editor-placeholder" id="image-placeholder-\${key}">Предпросмотр изображения</div></div>
+      <div class="image-editor-preview" data-empty="true"><img id="image-preview-\${key}" alt="" draggable="false" hidden><span class="image-watermark-layer" data-position="bottom-right" id="image-watermark-\${key}" hidden>© Ринна</span><div class="image-editor-placeholder" id="image-placeholder-\${key}">Предпросмотр изображения</div></div>
       <div class="image-editor-controls">
         <div class="image-editor-actions"><button class="btn-secondary" type="button" onclick="document.getElementById('image-file-\${key}').click()">Выбрать файл</button><input id="image-file-\${key}" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden onchange="uploadEditorImage('\${key}',this)"><button class="btn-danger" type="button" onclick="removeEditorImage('\${key}')">Удалить изображение</button></div>
         <div class="image-editor-meta"><span id="image-name-\${key}">Файл не выбран</span><span id="image-size-\${key}"></span></div>
@@ -1976,6 +1979,35 @@ function ensureArchiveOverlay(frame){
   overlay.append(grid,outline,label,corner);
   frame.append(overlay);
   return overlay;
+}
+function resetImageFrameGeometry(frame){
+  if(!frame) return;
+  frame.style.aspectRatio = '';
+  frame.dataset.empty = 'true';
+  for(const side of ['top','right','bottom','left']) frame.style.setProperty('--image-inset-' + side,'0%');
+}
+function syncImageFrameGeometry(image,record,scaleOverride){
+  const frame = image && image.parentElement;
+  if(!frame || !image.naturalWidth || !image.naturalHeight) return;
+  frame.style.aspectRatio = image.naturalWidth + ' / ' + image.naturalHeight;
+  frame.dataset.empty = 'false';
+  const effect = ['none','fade','darken','scale','zoom','glow','archive'].includes(record.imageEffect) ? (record.imageEffect === 'zoom' ? 'scale' : record.imageEffect) : 'none';
+  const position = ['center','top','bottom','left','right'].includes(record.imagePosition) ? record.imagePosition : 'center';
+  const intensity = (Number.isFinite(Number(record.imageIntensity)) ? Number(record.imageIntensity) : 50) / 100;
+  const baseScale = Number.isFinite(Number(record.imageScale)) ? Number(record.imageScale) : 100;
+  const scale = Number.isFinite(scaleOverride) ? scaleOverride : baseScale / 100 * (effect === 'scale' ? 1 + intensity * .25 : 1);
+  const inset = Math.round(Math.max(0,(1 - Math.min(1,scale)) * 100) * 10000) / 10000;
+  let top = inset / 2, right = inset / 2, bottom = inset / 2, left = inset / 2;
+  if(position === 'top'){top=0;bottom=inset;}
+  else if(position === 'bottom'){top=inset;bottom=0;}
+  else if(position === 'left'){left=0;right=inset;}
+  else if(position === 'right'){left=inset;right=0;}
+  frame.style.setProperty('--image-inset-top',top + '%');
+  frame.style.setProperty('--image-inset-right',right + '%');
+  frame.style.setProperty('--image-inset-bottom',bottom + '%');
+  frame.style.setProperty('--image-inset-left',left + '%');
+  const origins = {center:'50% 50%',top:'50% 0%',bottom:'50% 100%',left:'0% 50%',right:'100% 50%'};
+  image.style.transformOrigin = origins[position];
 }
 function renderImageDarkening(frame,record){
   if(!frame) return;
@@ -2042,12 +2074,14 @@ function renderImageEditorPreview(key){
   const frame = image.parentElement;
   const source = safeImageSource(state.image);
   if(source){
-    image.onerror = ()=>{image.hidden = true;placeholder.hidden = false;placeholder.textContent = 'Не удалось загрузить preview';};
-    image.onload = ()=>{image.hidden = false;placeholder.hidden = true;};
-    image.src = source;
+    image.onerror = ()=>{image.hidden = true;placeholder.hidden = false;placeholder.textContent = 'Не удалось загрузить preview';resetImageFrameGeometry(frame);renderImageWatermark(frame,state);renderArchiveMarkup(frame,{imageEffect:'none'});};
+    image.onload = ()=>{image.hidden = false;placeholder.hidden = true;applySavedImageEffects(image,state,key === 'poems' ? 'poem' : key === 'cycles' ? 'cycle' : 'prose');};
+    const resolvedSource = new URL(source,window.location.origin).href;
+    if(image.src !== resolvedSource){resetImageFrameGeometry(frame);image.src = source;}
     image.hidden = false;
     placeholder.hidden = true;
   }else{
+    resetImageFrameGeometry(frame);
     image.removeAttribute('src');
     image.hidden = true;
     placeholder.hidden = false;
@@ -2259,15 +2293,24 @@ function renderImageEffectPreview(){
   const empty = document.getElementById('image-effect-preview-empty');
   const source = safeImageSource(state.image);
   const contentKind = activeImageEditor === 'poems' ? 'poem' : activeImageEditor === 'cycles' ? 'cycle' : 'prose';
-  renderImageDarkening(frame,imageEffectDraft);
-  renderArchiveMarkup(frame,imageEffectDraft,contentKind);
   watermark.hidden = !imageEffectDraft.imageWatermark || !source;
   watermark.dataset.position = imageEffectDraft.imageWatermarkPosition;
   watermark.style.opacity = String(imageEffectDraft.imageWatermarkOpacity / 100);
-  if(!source){image.hidden=true;image.removeAttribute('src');empty.hidden=false;return;}
+  if(!source){
+    resetImageFrameGeometry(frame);
+    image.hidden=true;
+    image.removeAttribute('src');
+    renderImageDarkening(frame,imageEffectDraft);
+    renderArchiveMarkup(frame,imageEffectDraft,contentKind);
+    empty.hidden=false;
+    return;
+  }
   image.hidden=false;
   empty.hidden=true;
-  if(image.src !== new URL(source,window.location.origin).href) image.src = source;
+  image.onload = ()=>renderImageEffectPreview();
+  image.onerror = ()=>{resetImageFrameGeometry(frame);};
+  const resolvedSource = new URL(source,window.location.origin).href;
+  if(image.src !== resolvedSource){resetImageFrameGeometry(frame);image.src = source;}
   const positions = {center:'50% 50%',top:'50% 0%',bottom:'50% 100%',left:'0% 50%',right:'100% 50%'};
   image.style.objectPosition = positions[imageEffectDraft.imagePosition] || '50% 50%';
   const effect = imageEffectDraft.imageEffect;
@@ -2281,9 +2324,13 @@ function renderImageEffectPreview(){
     if(imageEffectDraft.imageHover === 'glow') shadow = '0 0 ' + (18 + intensity * 35) + 'px rgba(238,35,73,' + (.35 + intensity * .6) + ')';
   }
   image.style.transform = 'scale(' + scale + ')';
+  image.style.transformOrigin = positions[imageEffectDraft.imagePosition] || positions.center;
   image.style.opacity = String(opacity);
   image.style.filter = 'brightness(' + brightness + ')';
   image.style.boxShadow = shadow;
+  syncImageFrameGeometry(image,imageEffectDraft,scale);
+  renderImageDarkening(frame,imageEffectDraft);
+  renderArchiveMarkup(frame,imageEffectDraft,contentKind);
   frame.dataset.hover = imageHoverPreview ? 'true' : 'false';
 }
 function closeImageEffect(save){
@@ -2620,16 +2667,19 @@ function fillProsePreview(entry){
   const figure = document.getElementById('prose-preview-figure');
   const image = document.getElementById('prose-preview-image');
   const caption = document.getElementById('prose-preview-caption');
+  const frame = image.parentElement;
   const source = safeImageSource(entry.image);
-  image.onerror = ()=>{figure.hidden = true;};
-  image.onload = ()=>{figure.hidden = false;};
+  image.onerror = ()=>{figure.hidden = true;resetImageFrameGeometry(frame);};
+  image.onload = ()=>{applySavedImageEffects(image,entry,'prose');figure.hidden = false;};
   if(source){
-    image.src = source;
+    const resolvedSource = new URL(source,window.location.origin).href;
+    if(image.src !== resolvedSource){resetImageFrameGeometry(frame);image.src = source;}
     applySavedImageEffects(image,entry,'prose');
     caption.querySelector('.image-caption-text').textContent = entry.imageCaption || '';
     caption.hidden = !entry.imageCaption && !caption.querySelector('.archive-meta-caption').textContent;
     figure.hidden = false;
   }else{
+    resetImageFrameGeometry(frame);
     image.removeAttribute('src');
     figure.hidden = true;
   }
@@ -2746,7 +2796,6 @@ function applySavedImageEffects(image,record,contentKind='poem'){
   const hover = ['none','scale','zoom','glow'].includes(record.imageHover) ? (record.imageHover === 'zoom' ? 'scale' : record.imageHover) : 'none';
   const baseScale = Number.isFinite(Number(record.imageScale)) ? Number(record.imageScale) : 100;
   const intensity = (Number.isFinite(Number(record.imageIntensity)) ? Number(record.imageIntensity) : 50) / 100;
-  const overlay = (Number.isFinite(Number(record.imageOverlay)) ? Number(record.imageOverlay) : 0) / 100;
   const positions = {center:'50% 50%',top:'50% 0%',bottom:'50% 100%',left:'0% 50%',right:'100% 50%'};
   image.style.objectPosition = positions[position];
   image.style.opacity = effect === 'fade' ? String(.4 + intensity * .6) : '1';
@@ -2754,14 +2803,20 @@ function applySavedImageEffects(image,record,contentKind='poem'){
   image.style.filter = 'brightness(' + Math.max(0,1 - darken) + ')';
   const scale = baseScale / 100 * (effect === 'scale' ? 1 + intensity * .25 : 1);
   image.style.transform = 'scale(' + scale + ')';
+  image.style.transformOrigin = positions[position];
+  syncImageFrameGeometry(image,record,scale);
   image.style.boxShadow = effect === 'glow' ? '0 0 ' + (8 + intensity * 30) + 'px rgba(238,35,73,' + (.15 + intensity * .65) + ')' : 'none';
   image.style.transition = 'opacity .35s,transform .35s,filter .35s,box-shadow .35s';
   image.onmouseenter = ()=>{
-    if(hover === 'scale') image.style.transform = 'scale(' + (scale * 1.1) + ')';
+    if(hover === 'scale'){
+      image.style.transform = 'scale(' + (scale * 1.1) + ')';
+      syncImageFrameGeometry(image,record,scale * 1.1);
+    }
     if(hover === 'glow') image.style.boxShadow = '0 0 28px rgba(238,35,73,.72)';
   };
   image.onmouseleave = ()=>{
     image.style.transform = 'scale(' + scale + ')';
+    syncImageFrameGeometry(image,record,scale);
     image.style.boxShadow = effect === 'glow' ? '0 0 ' + (8 + intensity * 30) + 'px rgba(238,35,73,' + (.15 + intensity * .65) + ')' : 'none';
   };
   renderImageDarkening(image.parentElement,record);
@@ -2775,11 +2830,13 @@ function fillPoemPreview(poem){
   document.getElementById('preview-status').textContent = poemStatusLabel(poem);
   const figure = document.getElementById('preview-figure');
   const image = document.getElementById('preview-image');
+  const frame = image.parentElement;
   const source = safeImageSource(poem.image);
-  image.onerror = ()=>{figure.hidden = true;};
-  image.onload = ()=>{figure.hidden = false;};
+  image.onerror = ()=>{figure.hidden = true;resetImageFrameGeometry(frame);};
+  image.onload = ()=>{applySavedImageEffects(image,poem,'poem');figure.hidden = false;};
   if(source){
-    image.src = source;
+    const resolvedSource = new URL(source,window.location.origin).href;
+    if(image.src !== resolvedSource){resetImageFrameGeometry(frame);image.src = source;}
     applySavedImageEffects(image,poem,'poem');
     figure.hidden = false;
     const caption = typeof poem.imageCaption === 'string' ? poem.imageCaption : (poem.caption || '');
@@ -2787,6 +2844,7 @@ function fillPoemPreview(poem){
     captionElement.querySelector('.image-caption-text').textContent = caption;
     captionElement.hidden = !caption && !captionElement.querySelector('.archive-meta-caption').textContent;
   }else{
+    resetImageFrameGeometry(frame);
     image.removeAttribute('src');
     figure.hidden = true;
   }
@@ -3359,10 +3417,13 @@ function fillCyclePreview(cycle){
   document.getElementById('cycle-preview-status').textContent = cycle.status === 'published' ? 'Опубликован' : 'Черновик';
   const cover = document.getElementById('cycle-preview-cover');
   const figure = document.getElementById('cycle-preview-figure');
+  const frame = cover.parentElement;
   const source = safeImageSource(cycle.image || cycle.cover);
-  cover.onerror = ()=>{cover.hidden = true;figure.hidden = true;};
+  cover.onerror = ()=>{cover.hidden = true;figure.hidden = true;resetImageFrameGeometry(frame);};
+  cover.onload = ()=>{applySavedImageEffects(cover,cycle,'cycle');figure.hidden = false;};
   if(source){
-    cover.src = source;
+    const resolvedSource = new URL(source,window.location.origin).href;
+    if(cover.src !== resolvedSource){resetImageFrameGeometry(frame);cover.src = source;}
     cover.hidden = false;
     applySavedImageEffects(cover,cycle,'cycle');
     figure.hidden = false;
@@ -3370,6 +3431,7 @@ function fillCyclePreview(cycle){
     caption.querySelector('.image-caption-text').textContent = cycle.imageCaption || '';
     caption.hidden = !cycle.imageCaption && !caption.querySelector('.archive-meta-caption').textContent;
   }else{
+    resetImageFrameGeometry(frame);
     cover.removeAttribute('src');
     cover.hidden = true;
     figure.hidden = true;
