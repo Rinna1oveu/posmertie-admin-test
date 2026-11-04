@@ -6,7 +6,9 @@
     "cover": "/images/cycles/2fab42e7438e14b14b349afc8bfd5c70602f676ae54d228acdbd6267e0f8daf1.jpg",
     "image": "/images/cycles/2fab42e7438e14b14b349afc8bfd5c70602f676ae54d228acdbd6267e0f8daf1.jpg",
     "imageCaption": "",
-    "poemIds": [],
+    "poemIds": [
+      "a059b07b-c799-4aef-8af5-efe771cca623"
+    ],
     "imageEffect": "archive",
     "imagePosition": "center",
     "imageScale": 100,
