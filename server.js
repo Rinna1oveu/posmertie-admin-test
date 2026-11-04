@@ -1352,36 +1352,40 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .preview-poem h2{overflow-wrap:anywhere;margin:12px 0 27px;color:#fff1f3;font:700 clamp(30px,5vw,48px)/1.12 Georgia,"Times New Roman",serif}
 .preview-body{color:#e3d5d9;font:18px/1.9 Georgia,"Times New Roman",serif;white-space:pre-wrap}
 .preview-figure{position:relative;display:block;clear:both;box-sizing:border-box;width:100%;max-width:700px;overflow:hidden;isolation:isolate;margin:36px 0 0;background:#0b0709}
-.illustration-frame{position:relative;display:block;box-sizing:border-box;width:100%;max-height:440px;overflow:hidden;isolation:isolate;border:1px solid transparent;background:#0b0709}
-.illustration-frame>img{position:relative;z-index:0;display:block;width:100%;height:auto;max-height:440px;margin:0 auto;object-fit:contain}
+.illustration-frame{position:relative;display:block;box-sizing:border-box;width:100%;height:clamp(220px,52vw,440px);overflow:hidden;isolation:isolate;border:1px solid transparent;background:#0b0709}
+.illustration-frame>img{position:absolute;z-index:0;inset:0;display:block;width:100%;height:100%;margin:0;object-fit:contain;transform-origin:center center}
 .illustration-frame.archive-frame{border-color:#762038;box-shadow:inset 0 0 0 1px #ed29401c}
+.image-darkening-layer,.image-effect-preview-overlay{position:absolute;z-index:1;inset:0;pointer-events:none;transition:background .2s}
+.image-darkening-layer[hidden]{display:none}
 .archive-overlay{position:absolute;z-index:2;inset:0;overflow:hidden;pointer-events:none;color:#f5eff0;font:700 9px/1.35 Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase;user-select:none;-webkit-user-select:none}
 .archive-overlay[hidden]{display:none}
-.archive-grid{position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent 0 5px,#fff1 5px 6px),repeating-linear-gradient(90deg,transparent 0 44px,#ee234912 44px 45px),linear-gradient(90deg,transparent 8%,#ee23491c 8.1%,transparent 8.2%,transparent 91%,#ee23491c 91.1%,transparent 91.2%)}
-.archive-outline{position:absolute;inset:7px;border:1px solid #a72b441c}
+.archive-grid{position:absolute;z-index:1;inset:0;background:repeating-linear-gradient(0deg,transparent 0 5px,#fff1 5px 6px),repeating-linear-gradient(90deg,transparent 0 44px,#ee234912 44px 45px),linear-gradient(90deg,transparent 8%,#ee23491c 8.1%,transparent 8.2%,transparent 91%,#ee23491c 91.1%,transparent 91.2%)}
+.archive-outline{position:absolute;z-index:2;inset:7px;border:1px solid #a72b441c}
 .archive-outline:before,.archive-outline:after{position:absolute;content:"";width:22px;height:22px;border-color:#ec3150;border-style:solid;opacity:.72}
 .archive-outline:before{top:-1px;left:-1px;border-width:1px 0 0 1px}
 .archive-outline:after{right:-1px;bottom:-1px;border-width:0 1px 1px 0}
-.archive-visual-label,.archive-corner-label{position:absolute;top:13px;max-width:44%;overflow:hidden;padding:5px 7px;background:#10080bc9;text-overflow:ellipsis;white-space:nowrap}
+.archive-visual-label,.archive-corner-label{position:absolute;z-index:3;top:13px;max-width:44%;overflow:hidden;padding:5px 7px;background:#10080bc9;text-overflow:ellipsis;white-space:nowrap}
 .archive-visual-label{left:13px;border-left:1px solid #ee2349}
 .archive-corner-label{right:13px;color:#ef8191;text-align:right}
 .archive-corner-label[hidden]{display:none}
-.archive-meta{position:absolute;right:13px;bottom:13px;left:13px;max-height:3.1em;overflow:hidden;padding:4px 8px 4px 11px;border-left:1px solid #ee2349;background:linear-gradient(90deg,#10080bd9,#10080b88 80%,transparent);color:#eee0e3;font-size:8px;line-height:1.55;letter-spacing:.1em;white-space:normal}
-.archive-meta[hidden]{display:none}
-.preview-figure figcaption,.cycle-preview-figure figcaption{position:relative;margin:0;padding:10px 12px;border-top:1px solid #3c1720;color:#a58a91;text-align:center;font:italic 13px Georgia,"Times New Roman",serif}
+.archive-meta-caption{display:block;box-sizing:border-box;width:100%;margin:0;padding:8px 10px;border-left:1px solid #ee2349;background:linear-gradient(90deg,#10080bd9,#10080b88 80%,transparent);color:#eee0e3;text-align:left;font:700 8px/1.6 Arial,sans-serif;letter-spacing:.1em;overflow-wrap:anywhere}
+.preview-figure figcaption .archive-meta-caption,.cycle-preview-figure figcaption .archive-meta-caption{color:#eee0e3;text-align:left;font:700 8px/1.6 Arial,sans-serif;letter-spacing:.1em}
+.archive-meta-caption[hidden]{display:none}
+.image-effect-preview-meta{grid-column:1/-1;margin-top:-8px}
+.preview-figure figcaption,.cycle-preview-figure figcaption{position:relative;display:flex;flex-direction:column;gap:8px;margin:0;padding:10px 0 0;border:0;color:#a58a91;text-align:center;font:italic 13px Georgia,"Times New Roman",serif;overflow-wrap:anywhere}
+.preview-figure figcaption[hidden],.cycle-preview-figure figcaption[hidden]{display:none}
+.image-caption-text{display:block;padding:2px 12px 8px}
 .cycle-preview-figure{position:relative;display:block;clear:both;width:100%;max-width:760px;overflow:hidden;margin:0 auto 30px;isolation:isolate;background:#0b0709}
 .cycle-preview-content h2{overflow-wrap:anywhere}
-.cycle-preview-figure .illustration-frame{max-height:300px}
-.cycle-preview-figure .illustration-frame>img{max-height:300px}
-.preview-figure figcaption{margin-top:10px;color:#a58a91;text-align:center;font:italic 13px Georgia,"Times New Roman",serif}
+.cycle-preview-figure .illustration-frame{height:clamp(220px,36vw,300px)}
 .preview-status{margin-top:26px;color:#a83b53;font-size:9px;font-weight:700;letter-spacing:.2em;text-transform:uppercase}
 .image-editor{padding:15px;border:1px solid #421722;background:linear-gradient(145deg,#170b10,#10080b)}
 .image-editor-layout{display:grid;grid-template-columns:minmax(150px,220px) minmax(0,1fr);gap:16px}
-.image-editor-preview{position:relative;display:grid;place-items:center;min-height:145px;overflow:hidden;border:1px solid #5a1c2d;background:#0b0709}
-.image-editor-preview img{width:100%;height:100%;min-height:145px;object-fit:cover}
+.image-editor-preview{position:relative;display:grid;place-items:center;height:180px;min-height:0;overflow:hidden;isolation:isolate;border:1px solid #5a1c2d;background:#0b0709}
+.image-editor-preview img{position:absolute;z-index:0;inset:0;width:100%;height:100%;min-height:0;object-fit:contain;transform-origin:center center}
 .image-editor-preview img,.image-effect-preview-frame img,.preview-figure img{-webkit-user-drag:none;user-select:none}
 .image-editor-preview img[hidden]{display:none}
-.image-editor-placeholder{padding:12px;color:#806b72;text-align:center;font:italic 12px/1.5 Georgia,"Times New Roman",serif}
+.image-editor-placeholder{position:relative;z-index:5;padding:12px;color:#806b72;text-align:center;font:italic 12px/1.5 Georgia,"Times New Roman",serif}
 .image-editor-controls{min-width:0}
 .image-editor-controls label:first-child{margin-top:0}
 .image-editor-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:11px}
@@ -1396,11 +1400,11 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
 .image-effect-content{padding:22px}
 .image-effect-content .panel-heading{justify-content:flex-start}
 .image-effect-content .panel-heading h2{margin-top:3px}
-.image-effect-preview-frame{position:relative;height:280px;overflow:hidden;border:1px solid #682035;background:#0a0608}
-.image-effect-preview-frame img{width:100%;height:100%;object-fit:cover;transition:opacity .35s,transform .35s,filter .35s,box-shadow .35s}
+.image-effect-preview-frame{position:relative;box-sizing:border-box;height:280px;overflow:hidden;isolation:isolate;border:1px solid #682035;background:#0a0608}
+.image-effect-preview-frame img{position:absolute;z-index:0;inset:0;width:100%;height:100%;object-fit:cover;transform-origin:center center;transition:opacity .35s,transform .35s,filter .35s,box-shadow .35s}
 .image-effect-preview-frame img[hidden]{display:none}
-.image-effect-preview-overlay{position:absolute;inset:0;pointer-events:none;transition:background .2s}
-.image-effect-preview-empty{position:absolute;inset:0;display:grid;place-items:center;color:#806b72;font:italic 14px Georgia,"Times New Roman",serif}
+.image-effect-preview-overlay{z-index:1}
+.image-effect-preview-empty{position:absolute;z-index:5;inset:0;display:grid;place-items:center;color:#806b72;font:italic 14px Georgia,"Times New Roman",serif}
 .image-effect-preview-empty[hidden]{display:none}
 .image-watermark-layer,.image-effect-watermark{position:absolute;z-index:4;pointer-events:none;color:#fff;font:700 19px/1.2 Georgia,"Times New Roman",serif;letter-spacing:.03em;text-shadow:0 2px 5px #000,0 0 2px #000;user-select:none;-webkit-user-select:none}
 .image-watermark-layer[data-position="top-left"],.image-effect-watermark[data-position="top-left"]{top:12px;left:12px}
@@ -1668,10 +1672,10 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
         <div class="preview-toolbar"><span>PREVIEW / POETRY</span><button class="btn-secondary" type="button" onclick="closePoemPreview()">Закрыть <span aria-hidden="true">×</span></button></div>
         <div class="preview-poem">
           <div class="preview-index">ПОСМЕРТИЕ РИННЫ · АРХИВ</div>
-          <div class="preview-date" id="preview-date"></div>
           <h2 id="preview-title"></h2>
+          <div class="preview-date" id="preview-date"></div>
+          <figure class="preview-figure" id="preview-figure" hidden><div class="illustration-frame" id="preview-image-frame"><img id="preview-image" alt=""></div><figcaption id="preview-caption"><span class="archive-meta-caption" hidden></span><span class="image-caption-text"></span></figcaption></figure>
           <div class="preview-body" id="preview-body"></div>
-          <figure class="preview-figure" id="preview-figure" hidden><div class="illustration-frame" id="preview-image-frame"><img id="preview-image" alt=""></div><figcaption id="preview-caption"></figcaption></figure>
           <div class="preview-status" id="preview-status"></div>
         </div>
       </article>
@@ -1730,7 +1734,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
             <div class="preview-index">ПОСМЕРТИЕ РИННЫ · ЦИКЛ</div>
             <h2 id="cycle-preview-title"></h2>
             <p class="cycle-preview-description" id="cycle-preview-description"></p>
-            <figure class="cycle-preview-figure" id="cycle-preview-figure" hidden><div class="illustration-frame" id="cycle-preview-image-frame"><img class="cycle-preview-cover" id="cycle-preview-cover" alt="" hidden></div><figcaption id="cycle-preview-caption"></figcaption></figure>
+            <figure class="cycle-preview-figure" id="cycle-preview-figure" hidden><div class="illustration-frame" id="cycle-preview-image-frame"><img class="cycle-preview-cover" id="cycle-preview-cover" alt="" hidden></div><figcaption id="cycle-preview-caption"><span class="archive-meta-caption" hidden></span><span class="image-caption-text"></span></figcaption></figure>
             <div class="cycle-preview-poems" id="cycle-preview-poems"></div>
             <div class="preview-status" id="cycle-preview-status"></div>
           </div>
@@ -1807,11 +1811,11 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
           <div class="preview-toolbar"><span>PREVIEW / PROSE</span><button class="btn-secondary" type="button" onclick="closeProsePreview()">Закрыть <span aria-hidden="true">×</span></button></div>
           <div class="preview-poem prose-preview-content">
             <div class="preview-index">ПОСМЕРТИЕ РИННЫ · АРХИВ</div>
-            <div class="preview-date" id="prose-preview-meta"></div>
             <h2 id="prose-preview-title"></h2>
+            <div class="preview-date" id="prose-preview-meta"></div>
             <p class="prose-preview-description" id="prose-preview-description" hidden></p>
+            <figure class="preview-figure" id="prose-preview-figure" hidden><div class="illustration-frame" id="prose-preview-image-frame"><img id="prose-preview-image" alt=""></div><figcaption id="prose-preview-caption"><span class="archive-meta-caption" hidden></span><span class="image-caption-text"></span></figcaption></figure>
             <div class="preview-body" id="prose-preview-body"></div>
-            <figure class="preview-figure" id="prose-preview-figure" hidden><div class="illustration-frame" id="prose-preview-image-frame"><img id="prose-preview-image" alt=""></div><figcaption id="prose-preview-caption"></figcaption></figure>
             <div class="preview-status" id="prose-preview-status"></div>
           </div>
         </article>
@@ -1850,6 +1854,7 @@ h1{margin:0;font:800 clamp(30px,3.2vw,43px)/1.08 Inter,-apple-system,BlinkMacSys
               <span class="image-effect-watermark" id="image-effect-watermark" data-position="bottom-right">© Ринна</span>
               <div class="image-effect-preview-empty" id="image-effect-preview-empty">Выберите изображение, чтобы увидеть preview</div>
             </div>
+            <div class="archive-meta-caption image-effect-preview-meta" id="image-effect-preview-meta" hidden></div>
             <div class="editor-field editor-field-wide"><label for="image-effect-caption">Подпись к изображению</label><input id="image-effect-caption" type="text" maxlength="500" placeholder="Подпись"></div>
           </div>
           <button class="btn-secondary image-hover-toggle" id="image-hover-toggle" type="button" onclick="toggleImageHoverPreview()">Показать hover</button>
@@ -1968,10 +1973,23 @@ function ensureArchiveOverlay(frame){
   const outline = document.createElement('span'); outline.className = 'archive-outline';
   const label = document.createElement('span'); label.className = 'archive-visual-label';
   const corner = document.createElement('span'); corner.className = 'archive-corner-label';
-  const meta = document.createElement('span'); meta.className = 'archive-meta';
-  overlay.append(grid,outline,label,corner,meta);
+  overlay.append(grid,outline,label,corner);
   frame.append(overlay);
   return overlay;
+}
+function renderImageDarkening(frame,record){
+  if(!frame) return;
+  let layer = frame.querySelector(':scope > .image-effect-preview-overlay, :scope > .image-darkening-layer');
+  if(!layer){
+    layer = document.createElement('div');
+    layer.className = 'image-darkening-layer';
+    frame.append(layer);
+  }
+  const overlay = Math.max(0,Math.min(100,Number(record && record.imageOverlay) || 0)) / 100 * .65;
+  const archiveBase = record && record.imageEffect === 'archive' ? .12 : 0;
+  const opacity = 1 - (1 - archiveBase) * (1 - overlay);
+  layer.style.background = 'rgba(0,0,0,' + opacity + ')';
+  layer.hidden = opacity <= 0;
 }
 function renderImageWatermark(frame,record){
   if(!frame) return;
@@ -1994,9 +2012,15 @@ function renderArchiveMarkup(frame,record,contentKind='poem'){
   const effect = record && record.imageEffect === 'archive';
   frame.classList.toggle('archive-frame',effect);
   const overlay = ensureArchiveOverlay(frame);
-  const visible = effect && (!record || record.imageArchiveMarkup !== false);
+  const visible = effect && record.imageArchiveMarkup !== false;
   overlay.hidden = !visible;
-  if(!visible) return;
+  const metaTarget = frame.id === 'image-effect-preview-frame'
+    ? document.getElementById('image-effect-preview-meta')
+    : frame.parentElement && frame.parentElement.querySelector('figcaption .archive-meta-caption');
+  if(!visible){
+    if(metaTarget){metaTarget.textContent='';metaTarget.hidden=true;}
+    return;
+  }
   const fallbackLabel = contentKind === 'poem' ? 'POEM // VISUAL RECORD' : contentKind === 'cycle' ? 'CYCLE // VISUAL RECORD' : 'CHAPTER // VISUAL RECORD';
   const labelText = typeof record.visualRecordLabel === 'string' ? record.visualRecordLabel.trim() : fallbackLabel;
   const cornerText = typeof record.imageCornerLabel === 'string' ? record.imageCornerLabel.trim() : '';
@@ -2006,8 +2030,7 @@ function renderArchiveMarkup(frame,record,contentKind='poem'){
   overlay.querySelector('.archive-visual-label').hidden = !labelText;
   overlay.querySelector('.archive-corner-label').textContent = cornerText;
   overlay.querySelector('.archive-corner-label').hidden = !cornerText;
-  overlay.querySelector('.archive-meta').textContent = metaText;
-  overlay.querySelector('.archive-meta').hidden = !metaText;
+  if(metaTarget){metaTarget.textContent=metaText;metaTarget.hidden=!metaText;}
 }
 function renderImageEditorPreview(key){
   const state = imageEditorStates[key];
@@ -2032,7 +2055,10 @@ function renderImageEditorPreview(key){
   }
   renderImageWatermark(frame,state);
   if(source) applySavedImageEffects(image,state,key === 'poems' ? 'poem' : key === 'cycles' ? 'cycle' : 'prose');
-  else renderArchiveMarkup(frame,{imageEffect:'none'},key === 'poems' ? 'poem' : key === 'cycles' ? 'cycle' : 'prose');
+  else{
+    renderImageDarkening(frame,{imageEffect:'none',imageOverlay:0});
+    renderArchiveMarkup(frame,{imageEffect:'none'},key === 'poems' ? 'poem' : key === 'cycles' ? 'cycle' : 'prose');
+  }
   const name = document.getElementById('image-name-' + key);
   const size = document.getElementById('image-size-' + key);
   if(name) name.textContent = state.imageName || (state.image ? state.image.split('/').pop() : 'Файл не выбран');
@@ -2229,11 +2255,11 @@ function renderImageEffectPreview(){
   const state = imageEditorStates[activeImageEditor];
   const frame = document.getElementById('image-effect-preview-frame');
   const image = document.getElementById('image-effect-preview-image');
-  const overlay = document.getElementById('image-effect-preview-overlay');
   const watermark = document.getElementById('image-effect-watermark');
   const empty = document.getElementById('image-effect-preview-empty');
   const source = safeImageSource(state.image);
   const contentKind = activeImageEditor === 'poems' ? 'poem' : activeImageEditor === 'cycles' ? 'cycle' : 'prose';
+  renderImageDarkening(frame,imageEffectDraft);
   renderArchiveMarkup(frame,imageEffectDraft,contentKind);
   watermark.hidden = !imageEffectDraft.imageWatermark || !source;
   watermark.dataset.position = imageEffectDraft.imageWatermarkPosition;
@@ -2246,10 +2272,9 @@ function renderImageEffectPreview(){
   image.style.objectPosition = positions[imageEffectDraft.imagePosition] || '50% 50%';
   const effect = imageEffectDraft.imageEffect;
   const intensity = imageEffectDraft.imageIntensity / 100;
-  const overlayIntensity = imageEffectDraft.imageOverlay / 100;
   let scale = imageEffectDraft.imageScale / 100 * (effect === 'scale' ? 1 + intensity * .25 : 1);
   let opacity = effect === 'fade' ? .4 + intensity * .6 : 1;
-  let brightness = effect === 'darken' ? 1 - intensity * .65 : effect === 'archive' ? .88 : 1;
+  let brightness = effect === 'darken' ? 1 - intensity * .65 : 1;
   let shadow = effect === 'glow' ? '0 0 ' + (8 + intensity * 30) + 'px rgba(238,35,73,' + (.15 + intensity * .65) + ')' : 'none';
   if(imageHoverPreview){
     if(imageEffectDraft.imageHover === 'scale') scale *= 1.12;
@@ -2259,7 +2284,6 @@ function renderImageEffectPreview(){
   image.style.opacity = String(opacity);
   image.style.filter = 'brightness(' + brightness + ')';
   image.style.boxShadow = shadow;
-  overlay.style.background = 'rgba(0,0,0,' + overlayIntensity + ')';
   frame.dataset.hover = imageHoverPreview ? 'true' : 'false';
 }
 function closeImageEffect(save){
@@ -2602,8 +2626,8 @@ function fillProsePreview(entry){
   if(source){
     image.src = source;
     applySavedImageEffects(image,entry,'prose');
-    caption.textContent = entry.imageCaption || '';
-    caption.hidden = !entry.imageCaption;
+    caption.querySelector('.image-caption-text').textContent = entry.imageCaption || '';
+    caption.hidden = !entry.imageCaption && !caption.querySelector('.archive-meta-caption').textContent;
     figure.hidden = false;
   }else{
     image.removeAttribute('src');
@@ -2726,8 +2750,8 @@ function applySavedImageEffects(image,record,contentKind='poem'){
   const positions = {center:'50% 50%',top:'50% 0%',bottom:'50% 100%',left:'0% 50%',right:'100% 50%'};
   image.style.objectPosition = positions[position];
   image.style.opacity = effect === 'fade' ? String(.4 + intensity * .6) : '1';
-  const darken = effect === 'darken' ? intensity * .65 : effect === 'archive' ? .12 : 0;
-  image.style.filter = 'brightness(' + Math.max(0,1 - darken - overlay * .65) + ')';
+  const darken = effect === 'darken' ? intensity * .65 : 0;
+  image.style.filter = 'brightness(' + Math.max(0,1 - darken) + ')';
   const scale = baseScale / 100 * (effect === 'scale' ? 1 + intensity * .25 : 1);
   image.style.transform = 'scale(' + scale + ')';
   image.style.boxShadow = effect === 'glow' ? '0 0 ' + (8 + intensity * 30) + 'px rgba(238,35,73,' + (.15 + intensity * .65) + ')' : 'none';
@@ -2740,6 +2764,7 @@ function applySavedImageEffects(image,record,contentKind='poem'){
     image.style.transform = 'scale(' + scale + ')';
     image.style.boxShadow = effect === 'glow' ? '0 0 ' + (8 + intensity * 30) + 'px rgba(238,35,73,' + (.15 + intensity * .65) + ')' : 'none';
   };
+  renderImageDarkening(image.parentElement,record);
   renderArchiveMarkup(image.parentElement,record,contentKind);
   renderImageWatermark(image.parentElement,record);
 }
@@ -2758,8 +2783,9 @@ function fillPoemPreview(poem){
     applySavedImageEffects(image,poem,'poem');
     figure.hidden = false;
     const caption = typeof poem.imageCaption === 'string' ? poem.imageCaption : (poem.caption || '');
-    document.getElementById('preview-caption').textContent = caption;
-    document.getElementById('preview-caption').hidden = !caption;
+    const captionElement = document.getElementById('preview-caption');
+    captionElement.querySelector('.image-caption-text').textContent = caption;
+    captionElement.hidden = !caption && !captionElement.querySelector('.archive-meta-caption').textContent;
   }else{
     image.removeAttribute('src');
     figure.hidden = true;
@@ -3334,15 +3360,15 @@ function fillCyclePreview(cycle){
   const cover = document.getElementById('cycle-preview-cover');
   const figure = document.getElementById('cycle-preview-figure');
   const source = safeImageSource(cycle.image || cycle.cover);
-  cover.onerror = ()=>{cover.hidden = true;};
+  cover.onerror = ()=>{cover.hidden = true;figure.hidden = true;};
   if(source){
     cover.src = source;
-    applySavedImageEffects(cover,cycle,'cycle');
     cover.hidden = false;
+    applySavedImageEffects(cover,cycle,'cycle');
     figure.hidden = false;
     const caption = document.getElementById('cycle-preview-caption');
-    caption.textContent = cycle.imageCaption || '';
-    caption.hidden = !cycle.imageCaption;
+    caption.querySelector('.image-caption-text').textContent = cycle.imageCaption || '';
+    caption.hidden = !cycle.imageCaption && !caption.querySelector('.archive-meta-caption').textContent;
   }else{
     cover.removeAttribute('src');
     cover.hidden = true;
