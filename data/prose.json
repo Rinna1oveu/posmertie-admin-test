@@ -1,1 +1,30 @@
-[]
+[
+  {
+    "title": "123",
+    "type": "story",
+    "description": "123",
+    "text": "123",
+    "status": "draft",
+    "date": "2026-11-04",
+    "image": "/images/prose/2fab42e7438e14b14b349afc8bfd5c70602f676ae54d228acdbd6267e0f8daf1.jpg",
+    "imageCaption": "",
+    "imageEffect": "archive",
+    "imagePosition": "center",
+    "imageScale": 100,
+    "imageIntensity": 50,
+    "imageOverlay": 0,
+    "imageHover": "none",
+    "imageWatermark": true,
+    "imageWatermarkOpacity": 42,
+    "imageWatermarkPosition": "bottom-right",
+    "imageArchiveMarkup": true,
+    "visualRecordLabel": "CHAPTER // VISUAL RECORD2",
+    "imageMetaPrefix": "ИЛЛЮСТРАЦИЯ2",
+    "imageMetaSection": "СЕВЕРНЫЙ СОЮЗ2",
+    "imageMetaTitle": "ГЛАВА 02",
+    "imageCornerLabel": "",
+    "imageName": "6e3dd21edsadsadasdsad9a12ff50d3b808b10df39a0e.jpg",
+    "imageSize": 76812,
+    "id": "271a7892-c267-49e4-a0c2-b98d6a2ec7c2"
+  }
+]
